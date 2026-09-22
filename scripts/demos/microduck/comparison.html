@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MicroDuck walking: command vs actual</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101820;color:#edf2f7;font:16px system-ui}
+main{max-width:1600px;margin:30px auto;padding:0 24px}h1{font-size:30px;margin-bottom:8px}
+p{color:#b7c5d3;line-height:1.6}.pair{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+article,.summary,.chart{background:#1b2733;border:1px solid #344556;border-radius:12px;overflow:hidden}
+header,.readings{padding:16px 20px}h2{margin:0 0 8px;font-size:21px}small,.note{color:#b7c5d3;font-size:14px}
+.native{color:#83e3b6}.pretrained{color:#90c5ff}video{width:100%;display:block;background:#000}
+.controls{display:flex;align-items:center;gap:14px;margin:22px 0;flex-wrap:wrap}input{flex:1}
+button,select{padding:10px 16px;border:0;border-radius:7px;background:#dceaf6;color:#152637;font:inherit;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+td,th{padding:9px 12px;border-bottom:1px solid #344556;text-align:right}
+td:first-child,th:first-child{text-align:left}th{color:#b7c5d3;font-weight:500}
+.readings th,.readings td{padding:7px 8px}.speed{font-size:25px;font-weight:650}.speed span{font-size:14px;font-weight:400}
+.summary{padding:22px;margin-top:22px;overflow-x:auto}.summary p{margin:10px 0}.callout{color:#edf2f7}
+.chart{padding:16px;margin-top:20px}.chart svg{display:block;width:100%;touch-action:none;cursor:crosshair}
+.legend{display:flex;gap:20px;flex-wrap:wrap;font-size:14px}.command{color:#ffd18a}
+a{color:#90c5ff}#time{font-variant-numeric:tabular-nums;min-width:95px}
+@media(max-width:800px){.pair{grid-template-columns:1fr}main{padding:0 12px}td,th{padding:8px 6px;font-size:14px}}
+</style>
+<main>
+<h1>MicroDuck walking: command vs actual</h1>
+<p id="intro"></p>
+<div class="pair">
+<article>
+<header><h2 class="native">Trained in Isaac Lab + Newton</h2><small id="checkpoint"></small></header>
+<video id="native" src="native.mp4" muted playsinline preload="auto"></video>
+<div class="readings" id="native_readings"></div>
+</article>
+<article>
+<header><h2 class="pretrained">Pretrained in MuJoCo</h2><small>Released alpha_walking ONNX policy · running in Isaac Lab + Newton</small></header>
+<video id="pretrained" src="pretrained.mp4" muted playsinline preload="auto"></video>
+<div class="readings" id="pretrained_readings"></div>
+</article>
+</div>
+<div class="controls">
+<button id="play">Play both</button><button id="restart">Restart</button>
+<input id="seek" aria-label="Playback position" type="range" min="0" max="20" step="0.02" value="0">
+<span id="time">0.00 s</span>
+<label>Playback <select id="rate"><option value="0.5">0.5×</option><option value="1" selected>1× real time</option><option value="2">2×</option></select></label>
+</div>
+<p class="note">Readouts follow the video frames; pause or scrub to inspect a moment.
+Forward and sideways velocity are measured in the robot's body frame. Ground speed is
+the magnitude of velocity across the world's horizontal plane, including sideways motion.
+Turn rate is body yaw angular velocity. Ground speed is not the playback speed.</p>
+<div class="chart">
+<h2>Forward velocity over time</h2>
+<div class="legend"><span class="command">— Command</span><span class="native">— Isaac Lab trained</span><span class="pretrained">— MuJoCo pretrained</span></div>
+<svg id="velocity_chart" viewBox="0 0 1100 220" role="img" aria-label="Commanded and measured forward velocity over time"></svg>
+</div>
+<div class="chart">
+<h2>Ground speed over time</h2>
+<div class="legend"><span class="command">— Command magnitude</span><span class="native">— Isaac Lab trained</span><span class="pretrained">— MuJoCo pretrained</span></div>
+<svg id="speed_chart" viewBox="0 0 1100 220" role="img" aria-label="Commanded and measured ground speed over time"></svg>
+</div>
+<section class="summary">
+<h2 id="summary_title">Full rollout averages</h2>
+<table><thead><tr><th>Measurement</th><th>Command</th><th class="native">Isaac Lab trained</th><th class="pretrained">MuJoCo pretrained</th><th>Difference<br><small>MuJoCo − Isaac Lab</small></th></tr></thead><tbody id="summary_rows"></tbody></table>
+<div id="differences"></div>
+</section>
+<p class="note">Each policy retains its corresponding playback setup, including differences in
+controller and collision configuration. This compares these two rollouts, not training methods
+in isolation. The native policy is an early training result. Averages include startup and all
+recorded frames; ground speed is averaged per frame, not calculated from the average velocity.</p>
+<p class="note">Measurements: <a href="native.json">native JSON</a> · <a href="pretrained.json">pretrained JSON</a></p>
+</main>
+<script>
+const report = @@REPORT@@;
+const a=document.getElementById('native'), b=document.getElementById('pretrained');
+const button=document.getElementById('play'), seek=document.getElementById('seek');
+const command=report.native.command, commandSpeed=Math.hypot(command[0],command[1]);
+const duration=Math.min(report.native.duration_s,report.pretrained.simulated_seconds);
+const fixed=(x,n=3)=>Number(x).toFixed(n);
+const signed=x=>(x>=0?'+':'')+fixed(x);
+document.getElementById('intro').textContent=
+  'Both running in Isaac Lab + Newton. Command: forward '+fixed(command[0],2)+
+  ' m/s · sideways '+fixed(command[1],2)+' m/s · turn '+fixed(command[2],2)+
+  ' rad/s. Recorded for '+fixed(duration,1)+' seconds at 50 Hz.';
+document.getElementById('checkpoint').textContent='Native RSL-RL checkpoint · '+report.native.checkpoint.split('/').pop();
+document.getElementById('summary_title').textContent='Full '+fixed(duration,1)+'-second rollout averages';
+seek.max=duration;
+function pause(){a.pause();b.pause();button.textContent='Play both'}
+async function play(){try{await Promise.all([a.play(),b.play()]);button.textContent='Pause both'}catch(e){pause()}}
+function go(t){a.currentTime=b.currentTime=Math.max(0,Math.min(duration,t));update()}
+button.onclick=()=>a.paused?play():pause();
+document.getElementById('restart').onclick=()=>{go(0);play()};
+seek.oninput=()=>go(Number(seek.value));
+document.getElementById('rate').onchange=e=>{a.playbackRate=b.playbackRate=Number(e.target.value)};
+a.onended=()=>{go(0);play()};
+function sampleAt(samples,t){
+  let lo=0,hi=samples.length-1;
+  while(lo<hi){const mid=Math.ceil((lo+hi)/2);if(samples[mid].time_s<=t)lo=mid;else hi=mid-1}
+  return samples[lo];
+}
+for(const name of ['native','pretrained']){
+  document.getElementById(name+'_readings').innerHTML=
+    '<table><thead><tr><th>Live measurement</th><th>Command</th><th>Actual</th><th>Actual − command</th></tr></thead><tbody>'+
+    ['Forward (m/s)','Sideways (m/s)','Turn (rad/s)','Ground speed (m/s)'].map((label,i)=>
+      '<tr><td>'+label+'</td><td id="'+name+'_cmd_'+i+'"></td><td id="'+name+'_actual_'+i+'"></td><td id="'+name+'_error_'+i+'"></td></tr>').join('')+
+    '</tbody></table><p class="speed '+name+'" id="'+name+'_speed"></p>';
+}
+function live(name,t){
+  const s=sampleAt(report[name].playback_samples,t);
+  const actual=[...s.body_twist,s.ground_speed_m_s],target=[...s.command,Math.hypot(...s.command.slice(0,2))];
+  actual.forEach((value,i)=>{
+    document.getElementById(name+'_cmd_'+i).textContent=fixed(target[i]);
+    document.getElementById(name+'_actual_'+i).textContent=fixed(value);
+    document.getElementById(name+'_error_'+i).textContent=signed(value-target[i]);
+  });
+  document.getElementById(name+'_speed').innerHTML=fixed(s.ground_speed_m_s)+' <span>m/s ground speed · '+
+    fixed(s.ground_speed_m_s*3.6,2)+' km/h</span>';
+}
+const n=report.native,p=report.pretrained;
+const rows=[
+  ['Forward velocity (m/s)',command[0],n.mean_body_twist[0],p.mean_body_twist[0]],
+  ['Sideways velocity (m/s)',command[1],n.mean_body_twist[1],p.mean_body_twist[1]],
+  ['Turn rate (rad/s)',command[2],n.mean_body_twist[2],p.mean_body_twist[2]],
+  ['Ground speed (m/s)',commandSpeed,n.mean_ground_speed_m_s,p.mean_ground_speed_m_s],
+  ['Ground speed (km/h)',commandSpeed*3.6,n.mean_ground_speed_m_s*3.6,p.mean_ground_speed_m_s*3.6],
+  ['Forward tracking RMSE (m/s) ↓',0,n.twist_rmse[0],p.twist_rmse[0]],
+  ['Sideways tracking RMSE (m/s) ↓',0,n.twist_rmse[1],p.twist_rmse[1]],
+  ['Turn tracking RMSE (rad/s) ↓',0,n.twist_rmse[2],p.twist_rmse[2]]
+];
+if(command[0]!==0)rows.push(['Forward command achieved (%)',100,100*n.mean_body_twist[0]/command[0],100*p.mean_body_twist[0]/command[0]]);
+document.getElementById('summary_rows').innerHTML=rows.map(r=>
+  '<tr><td>'+r[0]+'</td>'+r.slice(1).map(x=>'<td>'+fixed(x)+'</td>').join('')+'<td>'+signed(r[3]-r[2])+'</td></tr>').join('');
+const lower=p.twist_rmse[0]<n.twist_rmse[0]?'MuJoCo pretrained':'Isaac Lab trained';
+let differences='<p class="callout"><strong>'+lower+'</strong> has the lower forward tracking error in this rollout ('+
+  fixed(n.twist_rmse[0])+' vs '+fixed(p.twist_rmse[0])+' m/s RMSE, Isaac Lab vs MuJoCo).</p>';
+const betterTurn=p.twist_rmse[2]<n.twist_rmse[2]?'MuJoCo pretrained':'Isaac Lab trained';
+differences+='<p><strong>'+betterTurn+'</strong> has less turning error: '+fixed(n.twist_rmse[2])+
+  ' vs '+fixed(p.twist_rmse[2])+' rad/s RMSE (Isaac Lab vs MuJoCo), with a '+fixed(command[2],2)+' rad/s turn command.</p>';
+differences+='<p>MuJoCo − Isaac Lab: '+signed(p.mean_body_twist[0]-n.mean_body_twist[0])+
+  ' m/s mean forward velocity; '+signed(p.mean_ground_speed_m_s-n.mean_ground_speed_m_s)+' m/s mean ground speed.</p>';
+if(command[0]>0 && n.mean_body_twist[0]<command[0] && p.mean_body_twist[0]<command[0])
+  differences+='<p>Both undertrack the forward command: Isaac Lab achieves '+fixed(100*n.mean_body_twist[0]/command[0],1)+
+    '%, and MuJoCo achieves '+fixed(100*p.mean_body_twist[0]/command[0],1)+'%. Sideways sway contributes to ground speed without increasing forward progress.</p>';
+differences+='<p>Native fall resets: '+n.fall_resets+'. Pretrained resets: '+p.resets+
+  '; completed rollout: '+(p.completed?'yes':'no')+'. Lower RMSE means closer command tracking.</p>';
+document.getElementById('differences').innerHTML=differences;
+const ns='http://www.w3.org/2000/svg',cursors=[];
+function node(tag,attrs,text){
+  const e=document.createElementNS(ns,tag);
+  for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);
+  if(text!==undefined)e.textContent=text;
+  return e;
+}
+function chart(id,measure,target){
+  const svg=document.getElementById(id),left=65,right=1080,top=14,bottom=180;
+  const values=[target,0,...n.playback_samples.map(measure),...p.playback_samples.map(measure)];
+  const low=Math.min(...values),high=Math.max(...values),pad=Math.max(.02,(high-low)*.1);
+  const ymin=low-pad,ymax=high+pad,x=t=>left+(right-left)*t/duration,y=v=>bottom-(bottom-top)*(v-ymin)/(ymax-ymin);
+  for(let i=0;i<5;i++){
+    const v=ymin+(ymax-ymin)*i/4;
+    svg.append(node('line',{x1:left,y1:y(v),x2:right,y2:y(v),stroke:'#344556'}));
+    svg.append(node('text',{x:left-8,y:y(v)+4,fill:'#b7c5d3','text-anchor':'end','font-size':12},fixed(v,2)));
+    const t=duration*i/4;
+    svg.append(node('text',{x:x(t),y:bottom+23,fill:'#b7c5d3','text-anchor':'middle','font-size':12},fixed(t,0)+' s'));
+  }
+  svg.append(node('text',{x:8,y:16,fill:'#b7c5d3','font-size':12},'m/s'));
+  svg.append(node('line',{x1:x(0),y1:y(target),x2:x(duration),y2:y(target),stroke:'#ffd18a','stroke-width':2,'stroke-dasharray':'7 5'}));
+  for(const [samples,color] of [[n.playback_samples,'#83e3b6'],[p.playback_samples,'#90c5ff']]){
+    svg.append(node('polyline',{points:samples.map(s=>x(s.time_s)+','+y(measure(s))).join(' '),fill:'none',stroke:color,'stroke-width':1.5}));
+  }
+  const cursor=node('line',{x1:left,x2:left,y1:top,y2:bottom,stroke:'#fff','stroke-width':1.5});
+  svg.append(cursor);cursors.push({cursor,x});
+  svg.onclick=e=>{const r=svg.getBoundingClientRect();go(((e.clientX-r.left)*1100/r.width-left)/(right-left)*duration)};
+}
+chart('velocity_chart',s=>s.body_twist[0],command[0]);
+chart('speed_chart',s=>s.ground_speed_m_s,commandSpeed);
+function update(){
+  const t=a.currentTime;seek.value=t;
+  document.getElementById('time').textContent=fixed(t,2)+' / '+fixed(duration,0)+' s';
+  live('native',t);live('pretrained',b.currentTime);
+  for(const {cursor,x} of cursors){cursor.setAttribute('x1',x(t));cursor.setAttribute('x2',x(t))}
+}
+function tick(){
+  if(!a.paused && Math.abs(a.currentTime-b.currentTime)>.06)b.currentTime=a.currentTime;
+  update();requestAnimationFrame(tick);
+}
+tick();
+Promise.all([a,b].map(v=>new Promise(resolve=>{if(v.readyState>=3)resolve();
+else v.addEventListener('canplay',resolve,{once:true})}))).then(play);
+</script>
+</html>
