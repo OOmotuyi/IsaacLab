@@ -9,8 +9,8 @@ Below, you'll find detailed examples of various policies for training and deploy
     :maxdepth: 1
 
     ../how-to/policy_inference_in_usd
-    01_io_descriptors/io_descriptors_101
     02_gear_assembly/gear_assembly_policy
     03_compass_with_NuRec/compass_navigation_policy_with_NuRec
     04_reach/reach_policy
     05_leapp/exporting_policies_with_leapp
+    06_so101_typing/so101_typing_policy

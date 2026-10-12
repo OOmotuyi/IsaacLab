@@ -10,45 +10,41 @@ the URDF/MJCF converters set it because they reach a Kit-only importer extension
 standalone importer wheel is absent. The override is additive: it can turn a kitless launch into
 a Kit one, never the reverse.
 
-Kit is never actually started here: availability and ``AppLauncher`` are faked, and reaching
-``_ensure_isaac_sim_available`` is the signal that the Kit branch was taken. No Kit/GPU required.
+Kit is never actually started here: the Kit launcher named by the config is faked, and constructing it
+is the signal that the Kit branch was taken. No Kit/GPU required.
 """
 
 import argparse
+import signal
 import sys
 import types
 
+import isaaclab_physx.app as physx_app
 import pytest
 
-import isaaclab.app as isaaclab_app
 import isaaclab.app.sim_launcher as sim_launcher
-import isaaclab.utils as isaaclab_utils
-import isaaclab.utils.assets as assets_utils
-from isaaclab.app import launch_simulation
+from isaaclab.app import SimulationLauncher, launch_simulation
 from isaaclab.physics import PhysicsCfg
+from isaaclab.renderers import RendererCfg
 
 
 @pytest.fixture
 def kit_branch_taken(monkeypatch: pytest.MonkeyPatch):
     """Report whether ``launch_simulation`` entered its Kit branch, without starting Kit."""
     taken: list[bool] = []
-    # pretend Kit is already running so the launcher skips constructing AppLauncher
-    monkeypatch.setattr(isaaclab_utils, "has_kit", lambda: True)
-    monkeypatch.setattr(sim_launcher, "_ensure_isaac_sim_available", lambda: taken.append(True))
+
+    class FakeKitLauncher(SimulationLauncher):
+        def __init__(self, launcher_args):
+            taken.append(True)
+
+    monkeypatch.setattr(physx_app, "KitLauncher", FakeKitLauncher)
     return taken
-
-
-def test_default_stays_kitless_for_a_kitless_config(kit_branch_taken):
-    with launch_simulation(cfg=PhysicsCfg(), launcher_args={}):
-        pass
-
-    assert kit_branch_taken == []
 
 
 def test_kitless_launch_configures_storage_before_user_code(kit_branch_taken, monkeypatch: pytest.MonkeyPatch):
     """A direct OmniClient read inside a kitless runtime must see profile routing."""
     events = []
-    monkeypatch.setattr(assets_utils, "configure_storage_profile", lambda: events.append("configured"))
+    monkeypatch.setattr(sim_launcher, "configure_storage_profile", lambda: events.append("configured"))
 
     with launch_simulation(cfg=PhysicsCfg(), launcher_args={}):
         events.append("user-code")
@@ -61,72 +57,52 @@ def test_storage_profile_failure_closes_started_kit(monkeypatch: pytest.MonkeyPa
     """A profile failure after Kit starts must still close the application."""
     close_calls = []
 
-    class FakeApp:
-        def close(self, **kwargs):
-            close_calls.append(kwargs)
-
-    class FakeAppLauncher:
-        def __init__(self, _launcher_args):
-            self.app = FakeApp()
+    class FakeKitLauncher(SimulationLauncher):
+        def close(self, exit_code=0):
+            close_calls.append(exit_code)
 
     def reject_profile():
         raise RuntimeError("profile rejected")
 
-    monkeypatch.setattr(sim_launcher, "_ensure_isaac_sim_available", lambda: None)
-    monkeypatch.setattr(isaaclab_utils, "has_kit", lambda: False)
-    monkeypatch.setattr(isaaclab_app, "AppLauncher", FakeAppLauncher)
-    monkeypatch.setattr(assets_utils, "configure_storage_profile", reject_profile)
+    monkeypatch.setattr(physx_app, "KitLauncher", FakeKitLauncher)
+    monkeypatch.setattr(sim_launcher, "configure_storage_profile", reject_profile)
 
     with pytest.raises(RuntimeError, match="profile rejected"):
         with launch_simulation(cfg=PhysicsCfg(), launcher_args={"require_kit": True}):
             pass
 
-    assert close_calls == [{"exit_code": 1}]
+    assert close_calls == [1]
 
 
-def test_require_kit_launches_kit_for_a_kitless_config(kit_branch_taken):
-    with launch_simulation(cfg=PhysicsCfg(), launcher_args={"require_kit": True}):
+@pytest.mark.parametrize(
+    "launcher_args",
+    [{"require_kit": True}, argparse.Namespace(require_kit=True), {"visualizer": ["kit"], "require_kit": False}],
+    ids=["dict", "namespace", "false_preserves_kit_requirement"],
+)
+def test_require_kit_is_additive(kit_branch_taken, launcher_args):
+    with launch_simulation(cfg=PhysicsCfg(), launcher_args=launcher_args):
         pass
 
     assert kit_branch_taken == [True]
 
 
-def test_require_kit_reads_from_a_namespace(kit_branch_taken):
-    # scripts pass their argparse namespace straight through, so the key is read off it too
-    with launch_simulation(cfg=PhysicsCfg(), launcher_args=argparse.Namespace(require_kit=True)):
+def test_kit_rejects_ovrtx_before_loading_runtime(monkeypatch: pytest.MonkeyPatch):
+    class CustomPhysxCfg(sim_launcher.PhysxCfg):
         pass
 
-    assert kit_branch_taken == [True]
-
-
-def test_require_kit_rejects_ovrtx_runtime(monkeypatch: pytest.MonkeyPatch):
-    config_scan = sim_launcher.Scan(
-        resolved_physics_cfg=None,
-        effective_cfg=object(),
-        visualizer_intent={"has_any_visualizers": False, "has_kit_visualizer": False},
-        has_ovrtx=True,
-        has_kit_camera=False,
-        has_kit_physics=False,
-        has_kitless_physics=True,
-        has_ovphysx_physics=False,
-        needs_kit=False,
-    )
-    monkeypatch.setattr(sim_launcher, "scan", lambda _cfg, _launcher_args: config_scan)
-
-    with pytest.raises(ValueError, match="OVRTX runtime"):
-        with launch_simulation(cfg=object(), launcher_args={"require_kit": True}):
-            pass
-
-
-def test_newton_rtx_rejects_kit_before_loading_ovrtx(monkeypatch: pytest.MonkeyPatch):
     calls = []
     monkeypatch.setitem(
         sys.modules, "ovrtx", types.SimpleNamespace(register_schema_paths=lambda: calls.append("register"))
     )
+    monkeypatch.setattr(physx_app, "KitLauncher", lambda _: pytest.fail("Invalid runtime reached Kit launch"))
 
-    with pytest.raises(ValueError, match="OVRTX runtime"):
-        with launch_simulation(sim_launcher.PhysxCfg(), {"visualizer": ["newton_rtx"]}):
-            pass
+    for cfg, launcher_args in (
+        (types.SimpleNamespace(physics=PhysicsCfg(), renderer=sim_launcher.OVRTXRendererCfg()), {"require_kit": True}),
+        (CustomPhysxCfg(), {"visualizer": ["newton_rtx"]}),
+    ):
+        with pytest.raises(ValueError, match="OVRTX runtime"):
+            with launch_simulation(cfg, launcher_args):
+                pass
 
     assert calls == []
 
@@ -136,23 +112,95 @@ def test_kitless_ovrtx_registers_before_user_code(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setitem(
         sys.modules, "ovrtx", types.SimpleNamespace(register_schema_paths=lambda: calls.append("register"))
     )
-    monkeypatch.setattr(assets_utils, "configure_storage_profile", lambda: calls.append("storage"))
-    cfg = argparse.Namespace(
-        physics=sim_launcher.NewtonCfg(),
-        visualizer_cfgs=argparse.Namespace(visualizer_type="newton_rtx"),
-    )
-
-    with launch_simulation(cfg):
+    monkeypatch.setattr(sim_launcher, "configure_storage_profile", lambda: calls.append("storage"))
+    with launch_simulation(sim_launcher.NewtonCfg(), {"visualizer": ["newton_rtx"]}):
         calls.append("user")
 
     assert calls == ["register", "storage", "user"]
 
 
-def test_require_kit_false_does_not_suppress_a_kit_config(kit_branch_taken):
-    # '--viz kit' requires Kit on its own; require_kit=False must not override that
-    launcher_args = {"visualizer": ["kit"], "visualizer_explicit": True, "require_kit": False}
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_config_named_launcher_starts_and_closes(monkeypatch: pytest.MonkeyPatch, interrupt):
+    """A config-selected launcher closes on success or interruption with the correct exit status."""
+    events = []
 
-    with launch_simulation(cfg=PhysicsCfg(), launcher_args=launcher_args):
-        pass
+    class FakeLauncher(SimulationLauncher):
+        def __init__(self, launcher_args):
+            events.append("start")
 
-    assert kit_branch_taken == [True]
+        def close(self, exit_code=0):
+            events.append(exit_code)
+
+    class CustomRendererCfg(RendererCfg):
+        launcher_type = "fake_runtime:FakeLauncher"
+
+    monkeypatch.setitem(sys.modules, "fake_runtime", types.SimpleNamespace(FakeLauncher=FakeLauncher))
+    cfg = argparse.Namespace(physics=sim_launcher.NewtonCfg(), renderer=CustomRendererCfg())
+
+    try:
+        with launch_simulation(cfg):
+            events.append("user")
+            if interrupt:
+                signal.raise_signal(signal.SIGINT)
+    except KeyboardInterrupt:
+        assert interrupt
+    else:
+        assert not interrupt
+
+    assert events == ["start", "user", 130 if interrupt else 0]
+
+
+@pytest.mark.parametrize("producer_count", [0, 1, 2])
+def test_shared_view_recording_selects_its_producer_without_a_window(producer_count):
+    """Retain each recorded perspective producer, including when viewers share the same backend."""
+    from types import SimpleNamespace
+
+    from isaaclab_newton.physics import NewtonCfg
+    from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
+
+    from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
+    from isaaclab.sim import SimulationCfg
+    from isaaclab.visualizers import ImageViewCfg, PerspectiveCameraCfg, WindowCfg
+
+    views = [ImageViewCfg(source=PerspectiveCameraCfg()) for _ in range(producer_count)]
+    visualizers = [NewtonGLVisualizerCfg(view=view, window=WindowCfg(size=(128, 96))) for view in views]
+    if producer_count == 1:
+        visualizers = visualizers[0]  # SimulationCfg also accepts a single configuration.
+    else:
+        visualizers.insert(0, NewtonGLVisualizerCfg())  # An unrelated viewer of the same backend must stay inactive.
+    cfg = SimpleNamespace(
+        sim=SimulationCfg(device="cpu", physics=NewtonCfg(), visualizer_cfgs=visualizers),
+        video_recorders=[VideoRecorderCfg(source=view) for view in views or [ImageViewCfg(source="front")]],
+    )
+    declared = cfg.sim.visualizer_cfgs
+    preview = sim_launcher.scan(cfg, {"visualizer": [], "headless": True})
+    assert cfg.sim.visualizer_cfgs is declared
+    assert len(preview.visualizer_cfgs) == producer_count
+    with launch_simulation(cfg, {"visualizer": [], "headless": True}):
+        assert len(cfg.sim.visualizer_cfgs) == producer_count
+        for producer, recorder in zip(cfg.sim.visualizer_cfgs, cfg.video_recorders):
+            assert producer.headless
+            assert producer.view is recorder.source
+            assert producer.window.size == (128, 96)
+
+
+@pytest.mark.parametrize("visualizers,source", [([], "newton_gl"), (["newton_gl"], "newton_gl"), ([], "kit")])
+def test_legacy_recording_reuses_the_display_producer(kit_branch_taken, visualizers, source):
+    """Display and multiple legacy recorders create one producer when none was configured."""
+    from types import SimpleNamespace
+
+    from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
+    from isaaclab.sim import SimulationCfg
+
+    cfg = SimpleNamespace(
+        sim=SimulationCfg(device="cpu", physics=sim_launcher.NewtonCfg(), visualizer_cfgs=None),
+        video_recorders=[VideoRecorderCfg(source=f"viz:{source}"), VideoRecorderCfg(source=f"viz:{source}")],
+    )
+    args = {"visualizer": visualizers}
+    sim_launcher.scan(cfg, args)
+    assert "enable_cameras" not in args
+    with launch_simulation(cfg, args):
+        assert len(cfg.sim.visualizer_cfgs) == 1
+        assert cfg.sim.visualizer_cfgs[0].headless == (not visualizers)
+        assert args.get("enable_cameras", False) == (source == "kit")
+    assert kit_branch_taken == [True] * (source == "kit")

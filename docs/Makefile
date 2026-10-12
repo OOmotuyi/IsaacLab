@@ -7,7 +7,7 @@ SPHINXOPTS    ?=
 SPHINXBUILD   ?= sphinx-build
 SOURCEDIR     = .
 BUILDDIR      = _build
-DOCS_DEFAULT_REF ?= develop
+DOCS_DEFAULT_REF ?= v3.0.0-EA
 
 .PHONY: multi-docs
 multi-docs:
@@ -20,3 +20,8 @@ multi-docs:
 current-docs:
 	@rm -rf "$(BUILDDIR)/current"
 	@$(SPHINXBUILD) -W --keep-going -j auto "$(SOURCEDIR)" "$(BUILDDIR)/current" $(SPHINXOPTS)
+
+# Keep the preview cache separate from the clean PR/CI build.
+.PHONY: incremental-docs
+incremental-docs:
+	@$(SPHINXBUILD) -W --keep-going -j auto "$(SOURCEDIR)" "$(BUILDDIR)/incremental" $(SPHINXOPTS)

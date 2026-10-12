@@ -22,12 +22,12 @@ Isaac Lab, and enter the repository:
    git clone https://github.com/isaac-sim/IsaacLab.git
    cd IsaacLab
 
-Train Cartpole with the Newton MJWarp physics backend and open the Newton
-visualizer:
+Train Cartpole with the Newton MJWarp physics backend (its default, selected
+explicitly here to show the syntax) and open the Newton visualizer:
 
 .. code-block:: bash
 
-   uv run isaaclab train --task Isaac-Cartpole --num_envs 16 --viz newton
+   uv run isaaclab train --task Isaac-Cartpole --num_envs 16 --viz newton_gl physics=newton_mjwarp
 
 Training outputs, including checkpoints, are saved under ``logs/``. Add
 ``--help`` to any command to see its available arguments:
@@ -81,8 +81,8 @@ VS Code uses Pylance. Cursor users should install basedpyright instead. See
    ``physics=ovphysx`` selects it for the task. You can combine extras as needed. The ``--extra all``
    shortcut installs the curated ``ov``, ``rl-games``, ``sb3``, ``skrl``, ``rsl-rl``, ``rerun``,
    and ``viser`` extras. Isaac Sim, standalone importers, and specialized extras such as ``rlinf``,
-   ``mimic``, ``teleop``, ``tetrahedralization``, ``video``, and ``leapp`` are not included; add
-   them explicitly. See
+   ``mimic``, ``teleop``, ``tetrahedralization``, ``video``, ``leapp``, and ``torchrl`` are not
+   included; add them explicitly. See
    :ref:`installation-optional-extras` for the complete list.
 
 Choose an RL library
@@ -112,6 +112,9 @@ and is a good starting point for GPU-based training.
    * - ``rlinf``
      - VLA model fine-tuning
      - ``uv run --extra rlinf isaaclab train --rl_library rlinf ...``
+   * - ``torchrl``
+     - PPO with PyTorch-native RL components
+     - ``uv run --extra torchrl isaaclab train --rl_library torchrl ...``
 
 RL libraries differ in their supported algorithms, tasks, and workflows. See
 :ref:`choose-an-rl-library` for a detailed comparison.
@@ -120,11 +123,13 @@ RL libraries differ in their supported algorithms, tasks, and workflows. See
 The five commands to know
 -------------------------
 
-All task commands accept ``--task <task_name>``. Start by listing the registered tasks:
+All task commands accept ``--task <task_name>``. Start by listing the registered tasks. The list shows
+which RL libraries and ``physics=`` / ``renderer=`` / ``presets=`` selectors each task supports, and
+runs without Isaac Sim:
 
 .. code-block:: bash
 
-   uv run python scripts/environments/list_envs.py
+   uv run isaaclab list_envs --show_presets
 
 .. list-table::
    :widths: 18 42 40
@@ -141,10 +146,10 @@ All task commands accept ``--task <task_name>``. Start by listing the registered
      - ``uv run isaaclab play --task Isaac-Cartpole --checkpoint latest``
    * - ``zero_agent``
      - Run a task with zero actions to verify that it launches correctly.
-     - ``uv run isaaclab zero_agent --task Isaac-Cartpole --viz newton``
+     - ``uv run isaaclab zero_agent --task Isaac-Cartpole --viz newton_gl``
    * - ``random_agent``
      - Run a task with random actions for a quick interaction smoke test.
-     - ``uv run isaaclab random_agent --task Isaac-Cartpole --viz newton``
+     - ``uv run isaaclab random_agent --task Isaac-Cartpole --viz newton_gl``
    * - ``benchmark``
      - Measure environment, training, play, or startup performance.
      - ``uv run isaaclab benchmark runtime --task Isaac-Cartpole``
@@ -214,6 +219,26 @@ example:
 
    uv run isaaclab train --task Isaac-Cartpole-Camera physics=newton_mjwarp renderer=newton_renderer presets=rgb
 
+Many tasks default to Isaac Sim PhysX, which needs Isaac Sim, while others, such as Cartpole,
+already default to Newton. Pick the setup path that matches your install and set its ``physics=``
+selector whenever a task's default backend doesn't match it. Add ``renderer=`` only for tasks
+with cameras or renderer presets, such as ``Isaac-Cartpole-Camera``; other tasks reject it. Run
+``uv run isaaclab list_envs --show_presets`` to see which presets a task declares:
+
+.. list-table::
+   :widths: 24 38 38
+   :header-rows: 1
+
+   * - Setup path
+     - Selectors
+     - Install
+   * - Kit-less (Newton, no Isaac Sim)
+     - ``physics=newton_mjwarp``; camera tasks add ``renderer=newton_renderer`` (or ``renderer=ovrtx``)
+     - Default ``uv run``; add ``--extra ovrtx`` for ``renderer=ovrtx``
+   * - With Isaac Sim (PhysX)
+     - ``physics=isaacsim_physx``; camera tasks add ``renderer=isaacsim_rtx``
+     - ``uv run --extra isaacsim``
+
 See :doc:`/source/concepts/backends_and_presets` for backend and preset selection,
 and :doc:`/source/features/hydra` for arbitrary configuration overrides.
 
@@ -223,7 +248,7 @@ Visualize a task
 
 Use ``--viz`` (or ``--visualizer``) to choose one or more visualizers during
 training or playback. To use multiple visualizers, pass a comma-separated list
-without spaces, such as ``--viz newton,rerun``.
+without spaces, such as ``--viz newton_gl,rerun``.
 
 .. list-table::
    :widths: 18 58 24
@@ -232,7 +257,7 @@ without spaces, such as ``--viz newton,rerun``.
    * - Option
      - Use it to
      - Required extra
-   * - ``--viz newton``
+   * - ``--viz newton_gl``
      - Open the Newton visualizer.
      - None
    * - ``--viz rerun``
@@ -244,7 +269,7 @@ without spaces, such as ``--viz newton,rerun``.
    * - ``--viz kit``
      - Open the Kit visualizer when it is available in your environment.
      - ``isaacsim``
-   * - Omit ``--viz`` or use ``--viz none``
+   * - Omit ``--viz``
      - Run without a visualizer.
      - None
 
@@ -253,7 +278,7 @@ For example, open the same task in both Newton and Rerun:
 .. code-block:: bash
 
    uv run --extra rerun isaaclab random_agent --task Isaac-Cartpole \
-      physics=newton_mjwarp --viz newton,rerun
+      physics=newton_mjwarp --viz newton_gl,rerun
 
 See :doc:`/source/concepts/visualization` for visualizer setup and
 configuration.
@@ -272,7 +297,7 @@ Then play the latest checkpoint in the Newton visualizer:
 
 .. code-block:: bash
 
-   uv run isaaclab play --task Isaac-Cartpole --checkpoint latest --viz newton
+   uv run isaaclab play --task Isaac-Cartpole --checkpoint latest --viz newton_gl
 
 Choose a checkpoint with one of the following options:
 

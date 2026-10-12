@@ -29,7 +29,7 @@ directory.
 
    .. literalinclude:: ../../../scripts/tutorials/01_assets/run_articulation.py
       :language: python
-      :emphasize-lines: 58-69, 91-104, 108-111, 116-117
+      :emphasize-lines: 53-64, 86-104, 106-112, 117-118
       :linenos:
 
 
@@ -134,13 +134,6 @@ the Isaac Sim viewport shown below:
          uv run isaaclab -p scripts/tutorials/01_assets/run_articulation.py --viz kit
 
 
-   .. tab-item:: isaaclab.sh / isaaclab.bat
-
-      .. code-block:: bash
-
-         ./isaaclab.sh -p scripts/tutorials/01_assets/run_articulation.py --viz kit
-
-
 This command should open a stage with a ground plane, lights, and two cart-poles that are moving around randomly.
 Press ``Ctrl+C`` in the terminal to stop the simulation.
 
@@ -153,8 +146,7 @@ In this tutorial, we learned how to create and interact with a simple articulati
 of an articulation (its root and joint state) and how to apply commands to it. We also saw how to update its
 buffers to read the latest state from the simulation.
 
-In addition to this tutorial, we also provide a few other scripts that spawn different robots. These are included
-in the ``scripts/demos`` directory. You can run these scripts as:
+The packaged Zoo demo also animates several robot families in one scene:
 
 .. tab-set::
 
@@ -162,17 +154,4 @@ in the ``scripts/demos`` directory. You can run these scripts as:
 
       .. code-block:: bash
 
-         # Spawn many different single-arm manipulators
-         uv run isaaclab -p scripts/demos/arms.py --viz kit
-
-         # Spawn many different quadrupeds
-         uv run isaaclab -p scripts/demos/quadrupeds.py --viz kit
-   .. tab-item:: isaaclab.sh / isaaclab.bat
-
-      .. code-block:: bash
-
-         # Spawn many different single-arm manipulators
-         ./isaaclab.sh -p scripts/demos/arms.py --viz kit
-
-         # Spawn many different quadrupeds
-         ./isaaclab.sh -p scripts/demos/quadrupeds.py --viz kit
+         uv run --extra isaacsim isaaclab demo zoo --viz kit

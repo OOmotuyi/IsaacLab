@@ -34,19 +34,14 @@ For this tutorial, we start from the direct workflow Humanoid environment define
 The Changes Explained
 ~~~~~~~~~~~~~~~~~~~~~
 
-Duplicating the file and registering a new task
------------------------------------------------
+Deriving and registering a new task
+-----------------------------------
 
-To avoid modifying the code of the existing task, we will make a copy of the file containing the Python
-code and perform the modification on this copy. Then, in the Isaac Lab project
+To avoid modifying the existing task, create an ``h1_env.py`` file in the Isaac Lab project
 ``source/isaaclab_tasks/isaaclab_tasks/core/locomotion/humanoid``
-folder we make a copy of the ``humanoid_direct_env.py`` file and rename it to ``h1_env.py``.
+folder. The new classes below inherit the existing environment and configuration, changing only the robot-specific data.
 
-Open the ``h1_env.py`` file in a code editor and replace all the humanoid task name (``HumanoidEnv``) and its configuration
-(``HumanoidEnvCfg``) instances to ``H1Env`` and ``H1EnvCfg`` respectively.
-This is necessary to avoid name conflicts during import when registering the environment.
-
-Once the name change has been made, we proceed to add a new entry to register the task under the name ``Isaac-H1-Direct-v0``.
+Register the derived task under the name ``Isaac-H1-Direct-v0``.
 To do this, we modify the ``__init__.py`` file in the same working folder and add the following entry.
 Refer to the :ref:`tutorial-register-rl-env-gym` tutorial for more details about environment registrations.
 
@@ -70,11 +65,11 @@ Refer to the :ref:`tutorial-register-rl-env-gym` tutorial for more details about
 Changing the robot
 ------------------
 
-The ``H1EnvCfg`` class (in the new created ``h1_env.py`` file) encapsulates the configuration values of the environment,
-including the assets to be instantiated. Particularly in this example, the ``robot`` property holds the target articulation configuration.
+The ``H1SceneCfg`` class (in the newly created ``h1_env.py`` file) declares the assets that the
+environment constructs. In this example, its ``robot`` property holds the target articulation configuration.
 
 Since the Unitree H1 robot is included in the Isaac Lab assets extension (``isaaclab_assets``) we can just import it
-and do the replacement directly (under the ``H1EnvCfg.robot`` property), as shown below. Note that we also need to modify the
+and do the replacement directly (under the ``H1SceneCfg.robot`` property), as shown below. Note that we also need to modify the
 ``joint_gears`` property as it holds robot-specific configuration values.
 
 .. |franka-direct-link| replace:: :isaaclab-source:`Isaac-Open-Drawer-Franka-Direct <source/isaaclab_tasks/isaaclab_tasks/core/cabinet/cabinet_direct_env.py>`
@@ -98,8 +93,13 @@ and do the replacement directly (under the ``H1EnvCfg.robot`` property), as show
    :end-before: [end-h1_env-robot]
 
 The robot changed, and with it the number of joints to control or the number of rigid bodies that compose the articulation, for example.
-Therefore, it is also necessary to adjust other values in the environment configuration that depend on the characteristics of the robot,
-such as the number of elements in the observation and action space.
+Therefore, define the derived environment configuration and adjust the values that depend on the robot, such as the action and
+observation spaces. The environment implementation itself remains unchanged.
+
+The H1 has 19 controlled joints. The inherited observation function combines 12 root and target
+values, 19 joint positions, 19 joint velocities, 19 actions, and 12 wrench values from its two feet,
+for 81 values. Set ``feet_body_names`` to match H1's ankle links so the joint-wrench sensor selects
+the correct bodies instead of the base Humanoid's foot names.
 
 .. literalinclude:: ../refs/snippets/tutorial_modify_direct_rl_env.py
    :language: python
@@ -119,12 +119,6 @@ After the minor modification has been done, and similar to the previous tutorial
 
         uv run --extra rl-games isaaclab train --rl_library rl_games --task Isaac-H1-Direct-v0
 
-   .. tab-item:: isaaclab.sh / isaaclab.bat
-
-      .. code-block:: bash
-
-        ./isaaclab.sh train --rl_library rl_games --task Isaac-H1-Direct-v0
-
 When the training is finished, we can visualize the result with the following command.
 To stop the simulation, you can either close the window, or press ``Ctrl+C`` in the terminal
 where you started the simulation.
@@ -136,12 +130,6 @@ where you started the simulation.
       .. code-block:: bash
 
         uv run --extra rl-games isaaclab play --rl_library rl_games --task Isaac-H1-Direct-v0 --num_envs 64 --viz kit
-
-   .. tab-item:: isaaclab.sh / isaaclab.bat
-
-      .. code-block:: bash
-
-        ./isaaclab.sh play --rl_library rl_games --task Isaac-H1-Direct-v0 --num_envs 64 --viz kit
 
 .. figure:: ../_static/tutorials/tutorial_modify_direct_rl_env.jpg
     :align: center
