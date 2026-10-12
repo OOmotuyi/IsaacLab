@@ -749,3 +749,582 @@ def test_cleanup_bin_horizontal_wire_gaps_are_smaller_than_marker(tmp_path):
     gaps = [upper - lower - r_lower - r_upper for (lower, r_lower), (upper, r_upper) in zip(rings, rings[1:])]
     assert gaps
     assert max(gaps) < 2 * MARKER_RADIUS
+
+
+def test_scratch_reach_curriculum_is_observed_and_resets_selected_robot(monkeypatch):
+    """Geometric targets need no motion file and expose curriculum depth to the actor."""
+    from types import SimpleNamespace
+
+    from isaaclab_tasks.contrib.microduck.mdp import skills
+    from isaaclab_tasks.contrib.microduck.skill_env_cfg import MicroDuckPickupScratchEnvCfg
+
+    cfg = MicroDuckPickupScratchEnvCfg()
+    assert cfg.actions.joint_pos.teacher_path is None
+    assert cfg.rewards.source_prior is None
+    assert cfg.commands.twist.reference_path is None
+    env = SimpleNamespace(
+        num_envs=2, device="cpu", step_dt=0.02, episode_length_buf=torch.zeros(2), common_step_counter=0
+    )
+    command = skills.MicroDuckSkillCommand(cfg.commands.twist, env)
+    monkeypatch.setattr(skills, "skill_head_position", lambda _: torch.zeros(2, 3))
+    command.reset(torch.arange(2))
+    command.style[:] = False
+    env.episode_length_buf[:] = 70
+    command.compute(env.step_dt)
+    initial = command.reference_pose.clone()
+    assert torch.count_nonzero(command.command[:, 2]) == 0
+    env.common_step_counter = cfg.commands.twist.reach_ramp_steps[1]
+    command.compute(env.step_dt)
+    assert torch.all(command.command[:, 2] == 1)
+    assert torch.all(command.reference_pose[:, 2] < initial[:, 2])
+    torch.testing.assert_close(command.reference_pose[:, 3:6].norm(dim=-1), torch.ones(2))
+    other = command.reference_pose[1].clone()
+    command.reset(torch.tensor([0]))
+    torch.testing.assert_close(command.reference_pose[0], initial[0])
+    torch.testing.assert_close(command.reference_pose[1], other)
+    cfg.play_mode()
+    assert cfg.commands.twist.reach_ramp_steps is None
+
+
+@pytest.mark.parametrize(
+    "config_name", ["MicroDuckStandScratchEnvCfg", "MicroDuckPickupScratchEnvCfg", "MicroDuckMarkerGraspEnvCfg"]
+)
+def test_scratch_skills_reset_and_step_without_pretrained_policy(tmp_path, config_name):
+    """Both tasks simulate finite random actions even when teacher loading is forbidden."""
+    repo = Path(__file__).resolve().parents[3]
+    robot = repo / "logs/microduck/marker_pick/assets_lip/robot_marker/robot_marker.usda"
+    if not robot.is_file() or not torch.cuda.is_available():
+        pytest.skip("Requires prepared cleanup robot and CUDA.")
+    grasp_task = config_name == "MicroDuckMarkerGraspEnvCfg"
+    module = "grasp_env_cfg" if grasp_task else "skill_env_cfg"
+    actor_dim, critic_dim, action_dim = (65, 68, 15) if grasp_task else (61, 76, 14)
+    probe = tmp_path / "scratch_probe.py"
+    probe.write_text(
+        f"""import argparse
+import torch
+from isaaclab.app import add_launcher_args, launch_simulation
+from isaaclab_tasks.contrib.microduck.{module} import {config_name}
+from isaaclab_tasks.contrib.microduck.mdp import skills
+
+def forbidden_teacher(*args, **kwargs):
+    raise AssertionError("Scratch task attempted to load pretrained weights")
+
+skills.MicroDuckSourceActor = forbidden_teacher
+parser = argparse.ArgumentParser()
+add_launcher_args(parser)
+args = parser.parse_args(["--viz", "none"])
+cfg = {config_name}()
+cfg.scene.num_envs = 4
+cfg.seed = 42
+with launch_simulation(cfg.sim, args):
+    from isaaclab.envs import ManagerBasedRLEnv
+    from isaaclab_tasks.contrib.microduck.microduck_env import MicroDuckGraspEnv
+    env_type = MicroDuckGraspEnv if {grasp_task} else ManagerBasedRLEnv
+    env = env_type(cfg)
+    try:
+        with torch.inference_mode():
+            obs, _ = env.reset()
+            assert obs["policy"].shape == (4, {actor_dim})
+            assert obs["critic"].shape == (4, {critic_dim})
+            assert getattr(env.action_manager.get_term("joint_pos"), "teacher", None) is None
+            assert "source_prior" not in env.reward_manager.active_terms
+            print("RESET_BEAK_M", skills.skill_head_position(env).cpu().tolist())
+            for _ in range(32):
+                obs, reward, done, timeout, _ = env.step(torch.randn(4, {action_dim}, device=env.device) * 0.15)
+                assert torch.isfinite(obs["policy"]).all()
+                assert torch.isfinite(obs["critic"]).all()
+                assert reward.shape == done.shape == timeout.shape == (4,)
+                assert torch.isfinite(reward).all()
+            env.reset(env_ids=torch.tensor([1], device=env.device))
+            assert torch.count_nonzero(env.action_manager.get_term("joint_pos").raw_actions[1]) == 0
+            if {grasp_task}:
+                model = env.action_manager.get_term("joint_pos").controller.solver.mj_model
+                ground = [i for i in range(model.ngeom) if "GroundPlane" in model.geom(i).name]
+                supports = [i for i in range(model.ngeom) if "/Support" in model.geom(i).name]
+                markers = [i for i in range(model.ngeom) if "/Object/" in model.geom(i).name]
+                assert ground and len(supports) == 2 and markers
+                def allowed(a, b):
+                    return bool(model.geom_contype[a] & model.geom_conaffinity[b]
+                                or model.geom_contype[b] & model.geom_conaffinity[a])
+                assert all(not allowed(a, b) for a in ground for b in supports)
+                assert all(allowed(a, b) for a in markers for b in supports)
+                pose = env.scene["object"].data.root_link_pose_w.torch.clone()
+                pose[1, 0] = float("nan")
+                env.scene["object"].write_root_pose_to_sim_index(root_pose=pose)
+                action = torch.zeros(4, {action_dim}, device=env.device)
+                obs, reward, done, _, _ = env.step(action)
+                assert done[1] and torch.isfinite(reward).all()
+                assert torch.isfinite(obs["policy"]).all()
+                for _ in range(8):
+                    obs, reward, done, _, _ = env.step(action)
+                    assert not env.termination_manager.get_term("invalid").any()
+                    assert torch.isfinite(reward).all() and torch.isfinite(obs["policy"]).all()
+    finally:
+        env.close()
+"""
+    )
+    result = subprocess.run(
+        [sys.executable, str(probe)],
+        cwd=repo,
+        env={**os.environ, "OMNI_KIT_ACCEPT_EULA": "yes"},
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_scratch_cleanup_command_matches_trained_depth_contract():
+    """Scratch reaching receives full depth; legacy commands remain unchanged."""
+    from room_cleanup import adapt_skill_command
+
+    command = [0.4, 0.8] + [0.0] * 11
+    adapted = adapt_skill_command(command, {"command_contract": "phase_cos_sin_depth"})
+    assert adapted[:2] == command[:2]
+    assert adapted[2] == 1.0
+    assert adapted[3:] == command[3:]
+    assert command[2] == 0.0
+    assert adapt_skill_command(command, {}) == command
+
+
+def test_live_cleanup_state_is_published_without_enabling_recording(tmp_path):
+    """A live viewer receives complete frames even when trajectory archival is off."""
+    from types import SimpleNamespace
+
+    import numpy as np
+    from cleanup_recording import CleanupRecording
+
+    bodies = torch.zeros(1, 2, 7)
+    bodies[..., -1] = 1
+    marker_pose = torch.tensor([[0.1, 0.2, 0.04, 0.0, 0.0, 0.0, 1.0]])
+    robot = SimpleNamespace(data=SimpleNamespace(body_link_pose_w=SimpleNamespace(torch=bodies)))
+    marker = SimpleNamespace(data=SimpleNamespace(root_link_pose_w=SimpleNamespace(torch=marker_pose)))
+    nodes = torch.tensor([[0.1, 0.2, 0.03], [0.11, 0.2, 0.03]])
+    path = tmp_path / "room/live.npz"
+    recorder = CleanupRecording(False, ["trunk", "head"], path)
+    recorder.append(0.02, robot, marker, nodes, False, phase="sock:pick", policy="alpha_ground_pick")
+    with np.load(path) as frame:
+        np.testing.assert_array_equal(frame["body_pose_m_xyzw"], bodies[0].numpy())
+        np.testing.assert_array_equal(frame["cloth_points_m"], nodes.numpy())
+        assert str(frame["phase"]) == "sock:pick"
+        assert float(frame["time_s"]) == 0.02
+    assert not path.with_suffix(".tmp").exists()
+    assert recorder.times == []
+
+
+def test_grasp_lift_reward_requires_opposed_contacts_and_bin_clearance():
+    """Lifting without a real two-sided grasp earns no lift reward."""
+    from types import SimpleNamespace
+
+    from isaaclab_tasks.contrib.microduck.mdp.grasp import grasp_lift_target, grasp_reward
+
+    heights = torch.tensor([0.20, 0.16, 0.0395, 0.24])
+    torch.testing.assert_close(grasp_lift_target(heights), torch.tensor([0.225, 0.21, 0.20, 0.25]))
+    command = SimpleNamespace(
+        refresh=lambda: None,
+        start_height=torch.full((4,), 0.04),
+        grasp_start_height=torch.full((4,), 0.04),
+        stage=torch.full((4,), 2),
+        cfg=SimpleNamespace(lift_distance=0.05),
+        lift=torch.tensor([0.16, 0.16, 0.08, -0.01]),
+        contacts=torch.tensor([[False, False], [True, False], [True, True], [True, True]]),
+    )
+    env = SimpleNamespace(
+        command_manager=SimpleNamespace(get_term=lambda _: command),
+        scene={"robot": SimpleNamespace(data=None)},
+        termination_manager=SimpleNamespace(get_term=lambda _: torch.zeros(4, dtype=torch.bool)),
+    )
+    torch.testing.assert_close(grasp_reward(env, "lift"), torch.tensor([0.0, 0.0, 0.5, 0.0]))
+    # Recovering an object grasped below its support height must get immediate lift credit.
+    command.grasp_start_height[3] = 0.02
+    assert grasp_reward(env, "lift")[3] == pytest.approx(0.01 / 0.18)
+    # Invalid physics is already a terminal failure and must not poison PPO returns.
+    command.lift[3] = float("nan")
+    env.termination_manager.get_term = lambda _: torch.tensor([False, False, False, True])
+    torch.testing.assert_close(grasp_reward(env, "lift"), torch.tensor([0.0, 0.0, 0.5, 0.0]))
+
+
+def test_grasp_jaw_reward_accepts_object_blocked_closure():
+    """A squeeze against an object is valid even though the jaws cannot close fully."""
+    from types import SimpleNamespace
+
+    from isaaclab_tasks.contrib.microduck.mdp.grasp import grasp_reward
+
+    command = SimpleNamespace(
+        stage=torch.tensor([2, 2, 0, 1]),
+        distance=torch.zeros(4),
+        jaw_ids=[0],
+        refresh=lambda: None,
+        contacts=torch.zeros(4, 2, dtype=torch.bool),
+    )
+    data = SimpleNamespace(joint_pos=SimpleNamespace(torch=torch.tensor([[0.37], [0.37], [0.5235987756], [0.37]])))
+    action = SimpleNamespace(jaw_target=torch.tensor([[-0.0872664626], [0.5235987756], [0.5235987756], [0.2181661565]]))
+    env = SimpleNamespace(
+        scene={"robot": SimpleNamespace(data=data)},
+        command_manager=SimpleNamespace(get_term=lambda _: command),
+        action_manager=SimpleNamespace(get_term=lambda _: action),
+        termination_manager=SimpleNamespace(get_term=lambda _: torch.zeros(4, dtype=torch.bool)),
+    )
+    reward = grasp_reward(env, "jaw")
+    torch.testing.assert_close(reward[[0, 2]], torch.ones(2))
+    assert reward[1] < 0.01
+    assert reward[3] == pytest.approx(0.5)
+    # Insertion must not reward hovering just outside the closing distance with an open jaw.
+    command.stage[2] = 1
+    command.distance[2] = 0.013
+    assert grasp_reward(env, "jaw")[2] == 0
+    # Real opposed contact keeps the squeeze valid after a marker settles at the lip.
+    command.contacts[2] = True
+    command.distance[2] = 0.02
+    action.jaw_target[2, 0] = -0.0872664626
+    assert grasp_reward(env, "jaw")[2] == pytest.approx(1.0)
+
+
+def test_grasp_approach_rewards_forward_aperture_and_is_yaw_invariant():
+    """Equal grip-point errors must not reward a backward-facing jaw equally."""
+    from types import SimpleNamespace
+
+    from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+
+    from isaaclab_tasks.contrib.microduck.mdp.grasp import grasp_jaw_orientation, grasp_reward
+
+    zero = torch.zeros(3)
+    yaw = quat_from_euler_xyz(zero, zero, torch.tensor([0.0, 0.8, 0.0]))
+    head_local = quat_from_euler_xyz(zero, torch.tensor([-torch.pi / 2, -torch.pi / 2, torch.pi / 2]), zero)
+    goal = torch.tensor([[0.068, 0.0, 0.215]]).repeat(3, 1)
+    command = SimpleNamespace(
+        head_id=0,
+        goal=goal,
+        pinch=goal.clone(),
+        object_quaternion=yaw.clone(),
+        refresh=lambda: None,
+        reach_height=torch.full((3,), 0.215),
+        start_height=torch.full((3,), 0.0395),
+        stage=torch.zeros(3, dtype=torch.long),
+        distance=torch.zeros(3),
+        lift=torch.zeros(3),
+    )
+    data = SimpleNamespace(
+        body_link_quat_w=SimpleNamespace(torch=quat_mul(yaw, head_local)[:, None]),
+        root_link_quat_w=SimpleNamespace(torch=yaw),
+    )
+
+    class Scene(dict):
+        env_origins = torch.zeros(3, 3)
+
+    env = SimpleNamespace(
+        scene=Scene(robot=SimpleNamespace(data=data)),
+        command_manager=SimpleNamespace(get_term=lambda _: command),
+        termination_manager=SimpleNamespace(get_term=lambda _: torch.zeros(3, dtype=torch.bool)),
+    )
+    orientation = grasp_jaw_orientation(env)
+    torch.testing.assert_close(orientation[:2], torch.ones(2))
+    assert orientation[2] < 0.01
+    approach = grasp_reward(env, "approach")
+    torch.testing.assert_close(approach[0], approach[1])
+    assert approach[0] > 9 * approach[2]
+    # Turning the robot without turning the marker must lose alignment reward.
+    command.object_quaternion[1] = command.object_quaternion[0]
+    skewed = grasp_jaw_orientation(env)
+    assert skewed[1] < 0.8 * skewed[0]
+    # Floor pickup approaches from above, with the aperture pointing down.
+    command.object_quaternion.copy_(yaw)
+    command.goal[:, 2] = 0.0395
+    data.body_link_quat_w.torch = yaw[:, None]
+    torch.testing.assert_close(grasp_jaw_orientation(env), torch.ones(3))
+    # An 8 mm error is substantial inside the 18 mm marker grasp aperture.
+    command.pinch = command.goal - torch.tensor([0.008, 0.0, 0.0])
+    broad = grasp_reward(env, "approach")
+    command.reach_height[:] = command.start_height
+    command.distance[:] = 0.008
+    precise = grasp_reward(env, "approach")
+    assert torch.all(precise < broad / 2)
+    # Once held, the useful centering reward follows the object, not a moving lift goal.
+    command.stage[:] = 2
+    command.distance[:] = 0.002
+    held = grasp_reward(env, "approach")
+    command.pinch[:, 2] -= 0.04
+    torch.testing.assert_close(grasp_reward(env, "approach"), held)
+    # Pregrasp and insertion must credit the same measured object centering.
+    command.stage[:] = 0
+    command.goal[:, 2] += 0.018
+    command.pinch[:] = command.goal - torch.tensor([0.0, 0.0, 0.020])
+    command.distance[:] = 0.002
+    pregrasp = grasp_reward(env, "approach") / (0.1 + 0.9 * grasp_jaw_orientation(env))
+    command.stage[:] = 1
+    command.goal[:, 2] -= 0.018
+    inserted = grasp_reward(env, "approach") / (0.1 + 0.9 * grasp_jaw_orientation(env))
+    torch.testing.assert_close(pregrasp, inserted)
+    assert (pregrasp > 0.7).all()
+    # A long marker needs stronger final roll alignment than a virtual reaching target.
+    command.goal[:, 2] = 0.0395
+    data.body_link_quat_w.torch = quat_from_euler_xyz(torch.full((3,), 0.15), zero, zero)[:, None]
+    narrow = grasp_jaw_orientation(env)
+    command.reach_height[:] = 0.215
+    broad = grasp_jaw_orientation(env)
+    assert (narrow < 0.9 * broad).all()
+
+
+def test_grasp_progress_requires_contact_lift_and_dwell_and_resets_independently():
+    """Reaching and one-sided touches cannot complete pickup; resets stay local."""
+    from isaaclab_tasks.contrib.microduck.grasp_contract import MicroDuckGraspState
+
+    state = MicroDuckGraspState(2, "cpu", 0.04, 0.04)
+    origins = torch.zeros(2, 3)
+    object_position = torch.tensor([[0.068, 0.0, 0.04]]).repeat(2, 1)
+    velocity = torch.zeros_like(object_position)
+    head = torch.zeros(2, 7)
+    head[:, 6] = 1
+    # A correctly placed grip point with an upside-down mouth must not advance.
+    head[:, 3:] = torch.tensor([[0.0, 1.0, 0.0, 0.0]])
+    from isaaclab.utils.math import quat_apply
+
+    head[:, :3] = object_position - quat_apply(head[:, 3:], state.pinch_local) - torch.tensor([0.0, 0.0, 0.018])
+    for _ in range(20):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert state.stage.tolist() == [0, 0]
+    assert not state.reach_seen.any()
+    # Correct centering with excessive roll must not unlock insertion of a long marker.
+    from isaaclab.utils.math import quat_from_euler_xyz
+
+    head[:, 3:] = quat_from_euler_xyz(torch.full((2,), 0.15), torch.zeros(2), torch.zeros(2))
+    exit_axis = quat_apply(head[:, 3:], torch.tensor([[0.0, 0.0, -1.0]]).repeat(2, 1))
+    head[:, :3] = object_position - quat_apply(head[:, 3:], state.pinch_local) - exit_axis * 0.018
+    for _ in range(20):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert state.stage.tolist() == [0, 0]
+    head[:, 3:] = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
+    # With identity orientation, the aperture's approach point is 18 mm above the marker.
+    head[:, :3] = object_position - state.pinch_local + torch.tensor([0.0, 0.0, 0.018])
+    for _ in range(4):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert state.stage.tolist() == [1, 1]
+    head[:, :3] = object_position - state.pinch_local
+    state.contacts[:, 0] = True
+    for _ in range(20):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert not state.success_seen.any()
+    assert state.stage.tolist() == [1, 1]
+    state.contacts[0, 1] = True
+    for _ in range(6):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert state.stage.tolist() == [2, 1]
+    assert not state.success_seen.any()
+    # Contact acquisition must not jump the target 160 mm out of reach.
+    assert 0.04 < state.goal[0, 2] < 0.045
+    before_goal = state.goal.clone()
+    state.update_progress(head, object_position, velocity, origins, 0.0)
+    torch.testing.assert_close(state.goal, before_goal)
+    # A stationary grasp must not leave the moving goal arbitrarily far overhead.
+    for _ in range(100):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert state.goal[0, 2] <= object_position[0, 2] + 0.010001
+    object_position[:, 2] = 0.20
+    head[:, :3] = object_position - state.pinch_local
+    for _ in range(16):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert state.success_seen.tolist() == [True, False]
+    before = state.contact_time[0].clone()
+    state.reset_progress(torch.tensor([1]))
+    assert state.success_seen.tolist() == [True, False]
+    assert state.stage.tolist() == [3, 0]
+    torch.testing.assert_close(state.contact_time[0], before)
+    assert not state.contacts[1].any()
+    # A dropped object must return to approach even after a previous success.
+    state.contacts[0] = False
+    object_position[0, 2] = 0.04
+    for _ in range(10):
+        state.update_progress(head, object_position, velocity, origins, 0.02)
+    assert state.stage[0] == 0
+    assert state.lift_time[0] == 0
+    assert state.goal[0, 2] < 0.06
+    assert state.success_seen[0]  # Historical success is retained for evaluation.
+    # A cylinder can settle at the lip, forward of the nominal open-mouth center.
+    grip = MicroDuckGraspState(1, "cpu", 0.04, 0.04)
+    obj = torch.tensor([[0.068, 0.0, 0.04]])
+    head = torch.tensor([[0.084, 0.0, 0.116, 0.0, 0.0, 0.0, 1.0]])
+    grip.contacts[:] = True
+    for _ in range(20):
+        grip.update_progress(head, obj, torch.zeros_like(obj), torch.zeros_like(obj), 0.02)
+    assert grip.stage[0] == 2
+    torch.testing.assert_close(grip.pinch, obj)
+    assert grip.goal[0, 2] - grip.pinch[0, 2] > 0.009
+    # The captured grasp frame must expose later slip; it must not follow the object.
+    obj[:, 2] -= 0.005
+    grip.update_progress(head, obj, torch.zeros_like(obj), torch.zeros_like(obj), 0.02)
+    torch.testing.assert_close(grip.distance, torch.tensor([0.005]))
+
+
+@pytest.mark.parametrize(
+    "failed,final_dwell,neck_error,advances",
+    [(True, 0.4, 0.0, False), (False, 0.0, 0.0, False), (False, 0.4, 0.0, True), (False, 0.4, 0.5, False)],
+)
+def test_grasp_curriculum_requires_survival_and_final_dwell(failed, final_dwell, neck_error, advances):
+    """A brief reach before falling or drifting away must not unlock a harder goal."""
+    from types import SimpleNamespace
+
+    from isaaclab_tasks.contrib.microduck.grasp_contract import MicroDuckGraspState
+    from isaaclab_tasks.contrib.microduck.mdp.grasp import reset_grasp
+
+    count = 256
+    command = MicroDuckGraspState(count, "cpu", 0.0395, 0.2)
+    command.cfg = SimpleNamespace(curriculum=True, minimum_object_height=0.0395)
+    command.last_step = 1
+    command.height_level, command.reach_level = 0.0395, 0.2
+    command.recent_success = command.recent_reach = command.recent_episodes = 0
+    command.reach_seen[:] = True
+    command.reach_time[:] = final_dwell
+    command.neck_error = torch.full((count,), neck_error)
+
+    def asset():
+        return SimpleNamespace(
+            cfg=SimpleNamespace(spawn=SimpleNamespace(size=(0.024, 0.016, 0.03))),
+            data=SimpleNamespace(
+                default_root_state=SimpleNamespace(torch=torch.zeros(count, 13)),
+                default_joint_pos=SimpleNamespace(torch=torch.zeros(count, 15)),
+            ),
+            write_root_pose_to_sim_index=lambda **kwargs: None,
+            write_root_velocity_to_sim_index=lambda **kwargs: None,
+            write_joint_state_to_sim_index=lambda **kwargs: None,
+        )
+
+    class Scene(dict):
+        env_origins = torch.zeros(count, 3)
+
+    env = SimpleNamespace(
+        scene=Scene(robot=asset(), object=asset(), support=asset(), support_other=asset()),
+        num_envs=count,
+        command_manager=SimpleNamespace(get_term=lambda _: command),
+        termination_manager=SimpleNamespace(terminated=torch.full((count,), failed)),
+    )
+    reset_grasp(env, torch.arange(count))
+    assert (command.reach_level < 0.2) == advances
+    assert command.recent_episodes == 0
+
+
+def test_grasp_partial_reset_does_not_double_count_other_worlds_dwell():
+    """Refreshing reset observations must not advance another world's contact timers."""
+    from types import SimpleNamespace
+
+    from isaaclab_tasks.contrib.microduck.grasp_contract import MicroDuckGraspState
+    from isaaclab_tasks.contrib.microduck.mdp.grasp import MicroDuckGraspCommand
+
+    command = MicroDuckGraspCommand.__new__(MicroDuckGraspCommand)
+    MicroDuckGraspState.__init__(command, 2, "cpu", 0.0395, 0.215)
+    command._env = SimpleNamespace(
+        common_step_counter=1, step_dt=0.02, num_envs=2, scene=SimpleNamespace(env_origins=torch.zeros(2, 3))
+    )
+    head = torch.tensor([[[0.005, 0.0, 0.231, 0.0, -math.sqrt(0.5), 0.0, math.sqrt(0.5)]]]).repeat(2, 1, 1)
+    command.robot = SimpleNamespace(
+        data=SimpleNamespace(
+            body_link_pose_w=SimpleNamespace(torch=head), joint_pos=SimpleNamespace(torch=torch.full((2, 1), 0.27))
+        )
+    )
+    command.neck_id = 0
+    command.neck_error = torch.zeros(2)
+    command.object = SimpleNamespace(
+        data=SimpleNamespace(
+            root_link_pos_w=SimpleNamespace(torch=torch.tensor([[0.068, 0.0, 0.0395]]).repeat(2, 1)),
+            root_link_lin_vel_w=SimpleNamespace(torch=torch.zeros(2, 3)),
+            root_link_quat_w=SimpleNamespace(torch=torch.tensor([[0.0, 0.0, 0.0, 1.0]]).repeat(2, 1)),
+        )
+    )
+    command.head_id = 0
+    command.last_step = -1
+    command._progress_step = torch.zeros(2, dtype=torch.long)
+    command._reset_step = torch.full((2,), -1, dtype=torch.long)
+    command._read_contacts = lambda: command.contacts.fill_(True)
+    command.refresh()
+    torch.testing.assert_close(command.reach_time, torch.tensor([0.02, 0.02]))
+    command._resample_command(torch.tensor([0]))
+    command.refresh()
+    torch.testing.assert_close(command.reach_time, torch.tensor([0.0, 0.02]))
+    torch.testing.assert_close(command.contact_time, torch.tensor([0.0, 0.02]))
+    assert not command.contacts[0].any()
+    command._env.common_step_counter = 2
+    command.refresh()
+    torch.testing.assert_close(command.reach_time, torch.tensor([0.02, 0.04]))
+
+
+def test_grasp_features_use_robot_yaw_and_include_measured_jaw():
+    """Playback's object observations share the task's sixteen-value SI contract."""
+    from isaaclab_tasks.contrib.microduck.grasp_contract import MicroDuckGraspState
+
+    state = MicroDuckGraspState(1, "cpu", 0.04, 0.04)
+    state.pinch = torch.zeros(1, 3)
+    state.goal = torch.tensor([[1.0, 0.0, 0.0]])
+    quarter_turn = torch.tensor([[0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)]])
+    state.object_quaternion.copy_(quarter_turn)
+    features = state.features(
+        quarter_turn, state.goal * 2, state.goal * 3, torch.tensor([[0.2]]), torch.tensor([[0.4]])
+    )
+    assert features.shape == (1, 16)
+    torch.testing.assert_close(
+        features[0, :9], torch.tensor([0.0, -1.0, 0.0, 0.0, -2.0, 0.0, 0.0, -3.0, 0.0]), atol=1e-6, rtol=0
+    )
+    torch.testing.assert_close(features[0, 9:], torch.tensor([0.2, 0.4, 1.0, 0.0, 0.0, 0.0, 0.0]))
+    state.object_quaternion[:] = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
+    misaligned = state.features(
+        quarter_turn, state.goal * 2, state.goal * 3, torch.tensor([[0.2]]), torch.tensor([[0.4]])
+    )
+    assert misaligned[0, -1] == pytest.approx(-math.pi / 2)
+
+
+def test_learned_cleanup_pick_waits_for_measured_grasp_completion():
+    """The object-conditioned controller cannot finish pickup from a phase clock."""
+    import numpy as np
+    from cleanup_sequence import CleanupSequence, PickupState
+
+    sequence = CleanupSequence(phase="pick", object_conditioned_pick=True)
+    center = np.array([0.068, 0.0, 0.20])
+    obj = PickupState(center, center - 0.009, center + 0.009, 0.0, True, 0.01)
+    root = np.array([0.0, 0.0, 0.12])
+    objects = {"marker": obj, "sock": obj}
+    sequence.step(5.0, root, 0.0, objects)
+    assert sequence.phase == "pick"
+    sequence.step(5.02, root, 0.0, objects, learned_grasp_ready=True)
+    assert sequence.phase == "lift_check"
+    failed = CleanupSequence(phase="pick", object_conditioned_pick=True)
+    failed.step(12.02, root, 0.0, objects)
+    assert failed.phase == "grasp_failed"
+
+
+def test_cleanup_grasp_inference_preserves_walking_and_tracks_assisted_cloth_patch():
+    """Walking keeps its jaw command; sock feedback follows the two held cloth nodes."""
+    from types import SimpleNamespace
+
+    import numpy as np
+    from grasp_playback import infer_cleanup_action
+
+    session = SimpleNamespace(
+        get_inputs=lambda: [SimpleNamespace(name="obs")],
+        run=lambda *_: [np.zeros((1, 14), dtype=np.float32)],
+    )
+    measured = []
+
+    def grasp_step(target, position, velocity, contacts, *, object_quaternion=None):
+        measured.append((target, position.clone(), velocity.clone(), contacts))
+        return torch.ones(1, 14), -0.08
+
+    grasp = SimpleNamespace(step=grasp_step)
+    common = dict(grasp=grasp, target="sock", marker=None, marker_contacts=[], sock_opposed=False)
+    action, jaw = infer_cleanup_action(
+        session, torch.zeros(1, 61), 0.45, policy_name="native_walking", sock=None, assistance=None, **common
+    )
+    assert not measured
+    assert jaw == 0.45
+    np.testing.assert_array_equal(action, np.zeros((1, 14)))
+    nodes = torch.tensor([[[0.0, -0.04, 0.10], [0.02, 0.0, 0.20], [0.04, 0.01, 0.20], [0.0, 0.08, 0.09]]])
+    velocity = torch.tensor([[[0.0, 0.0, 0.0], [0.1, 0.0, 0.2], [0.3, 0.0, 0.4], [0.0, 0.0, 0.0]]])
+    sock = SimpleNamespace(
+        data=SimpleNamespace(nodal_pos_w=SimpleNamespace(torch=nodes), nodal_vel_w=SimpleNamespace(torch=velocity))
+    )
+    assistance = SimpleNamespace(active=True, ids=torch.tensor([1, 2]))
+    _, jaw = infer_cleanup_action(
+        session, torch.zeros(1, 61), 0.45, policy_name="alpha_ground_pick", sock=sock, assistance=assistance, **common
+    )
+    assert measured[0][0] == "sock"
+    torch.testing.assert_close(measured[0][1], torch.tensor([[0.03, 0.005, 0.20]]))
+    torch.testing.assert_close(measured[0][2], torch.tensor([[0.20, 0.0, 0.30]]))
+    assert measured[0][3] == (True, True)
+    assert jaw == pytest.approx(0.18)

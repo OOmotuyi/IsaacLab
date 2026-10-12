@@ -66,13 +66,38 @@ def build_report(run_dir: Path, video: Path) -> Path:
         if metrics.get("assisted_grasp_enabled")
         else "Contact-only demo: no grasp attachment."
     )
-    policy_note = (
-        "Standing and pickup body skills were warm-started from MuJoCo and fine-tuned with PPO in Isaac Lab + Newton. "
-        "Walking uses the existing Isaac Lab checkpoint. No end-to-end cleanup policy was trained."
-        if metrics.get("native_body_skills")
-        else "Body motion uses released or overridden pickup skills and Isaac Lab-trained walking. "
-        "No end-to-end cleanup policy was trained."
-    )
+    if metrics.get("learned_object_grasp_used"):
+        initialization = metrics["policy_provenance"]["alpha_ground_pick"]["metadata"]["initialization"]
+        grasp_note = (
+            "Object-conditioned body and jaw grasping used a new random network with a geometric output bias. "
+            if initialization == "random_geometric_output_bias"
+            else "Object-conditioned body and jaw grasping continued from the Isaac-trained standing actor. "
+        )
+        policy_note = (
+            "Standing and walking were trained from scratch in Isaac Lab + Newton. "
+            + grasp_note
+            + "No MuJoCo policy weights were used. Navigation, carrying head hold, "
+            "and release sequencing remain scripted. "
+            "No end-to-end cleanup policy was trained."
+        )
+    elif metrics.get("scratch_body_skills"):
+        policy_note = (
+            "Standing, reaching, and walking use Isaac Lab + Newton training from scratch. "
+            "Jaw motion, head hold, and cleanup sequencing are scripted. No end-to-end cleanup policy was trained."
+        )
+    elif metrics.get("native_body_skills"):
+        policy_note = (
+            "Standing and pickup body skills were warm-started from MuJoCo "
+            "and fine-tuned with PPO in Isaac Lab + Newton. "
+            "Walking uses the existing Isaac Lab checkpoint. "
+            "Jaw motion, head hold, and cleanup sequencing are scripted. "
+            "No end-to-end cleanup policy was trained."
+        )
+    else:
+        policy_note = (
+            "Body motion uses released or overridden pickup skills and Isaac Lab-trained walking. "
+            "Jaw motion, head hold, and cleanup sequencing are scripted. No end-to-end cleanup policy was trained."
+        )
     bin_geometry = metrics.get("bin_geometry", {})
     basket_note = (
         f"Lidless wire basket: {100 * bin_geometry['height']:.1f} cm rim height. "
@@ -123,7 +148,7 @@ details{margin-top:22px}img{width:100%;border-radius:12px}button,select{font:inh
 <p>__BASKET__</p>__RENDER__
 <details open><summary>Bedroom overview</summary>
 <img src="room_overview.jpg" alt="Cutaway bedroom with bed, chair, MicroDuck, marker, fabric sock, and bin"></details>
-<p>The sock is simulated cloth. Jaw motion, head hold, and task sequencing are scripted,
+<p>The sock is simulated cloth.
 __POLICIES__
 The standard setup uses low supports; this run does not demonstrate finding arbitrary objects on the floor.
 __COUPLING__</p>

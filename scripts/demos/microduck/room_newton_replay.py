@@ -96,8 +96,15 @@ def record(args: argparse.Namespace) -> None:
         imgui.text(f"Sock attachment active: {'YES' if attached else 'no'}")
         imgui.text("Sock: assisted grasp")
         imgui.text("Marker: contact grasp")
-        imgui.text("Trained body skills;")
-        imgui.text("scripted jaw and sequence")
+        imgui.text(
+            "Scratch-trained body skills;" if metrics.get("scratch_body_skills", False) else "Trained body skills;"
+        )
+        imgui.text(f"In bin: marker={row['completed']['marker']}, sock={row['completed']['sock']}")
+        imgui.text(
+            "Learned grasp/jaw; scripted transport/release"
+            if metrics.get("learned_object_grasp_used")
+            else "Scripted jaw and sequence"
+        )
         imgui.separator()
 
     viewer.register_ui_callback(panel, position="panel")

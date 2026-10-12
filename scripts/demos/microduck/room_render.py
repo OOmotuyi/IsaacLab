@@ -206,10 +206,19 @@ def Scope "Render" {{
             data = {name: archive[name] for name in archive.files}
         metrics = json.loads((args.run_dir / "metrics.json").read_text())
         policy_label = (
-            "Isaac Lab + Newton trained body skills"
+            "Scratch-trained Isaac Lab + Newton body skills"
+            if metrics.get("scratch_body_skills", False)
+            else "Isaac Lab + Newton trained body skills"
             if metrics["native_body_skills"]
             else "Existing body-policy checkpoints"
         )
+        control_label = (
+            "Learned grasp/jaw; scripted transport/release"
+            if metrics.get("learned_object_grasp_used")
+            else "Scripted cleanup"
+        )
+        trace = [json.loads(line) for line in (args.run_dir / "trace.jsonl").read_text().splitlines()]
+        trace_times = np.array([row["time_s"] for row in trace])
         font_size = max(14, args.width // 64)
         font = ImageFont.truetype("DejaVuSans.ttf", font_size)
         line_height, padding = font_size + 6, font_size // 3
@@ -221,7 +230,8 @@ def Scope "Render" {{
             preset="medium",
             ffmpeg_params=["-crf", "18"],
         )
-        frames = round((float(data["time_s"][-1]) - args.time) * args.fps) + 1
+        sample_dt = float(np.median(np.diff(data["time_s"])))
+        frames = round((float(data["time_s"][-1]) - args.time + sample_dt) * args.fps)
         for frame in range(frames):
             t = args.time + frame / args.fps
             ordinal = frame + 2
@@ -232,7 +242,7 @@ def Scope "Render" {{
             draw = ImageDraw.Draw(overlay)
             index = min(len(data["time_s"]) - 1, int(np.searchsorted(data["time_s"], t)))
             active = bool(data["assistance_active"][index])
-            draw.rectangle((0, 0, args.width, 2 * (line_height + padding)), fill=(22, 28, 34))
+            draw.rectangle((0, 0, args.width, 3 * (line_height + padding)), fill=(22, 28, 34))
             draw.text(
                 (12, padding),
                 (
@@ -245,7 +255,15 @@ def Scope "Render" {{
             )
             draw.text(
                 (12, padding + line_height),
-                policy_label + " | Scripted cleanup | RTX render of recorded simulation",
+                policy_label + " | " + control_label + " | RTX replay",
+                font=font,
+                fill="white",
+            )
+            row = trace[min(len(trace) - 1, max(0, int(np.searchsorted(trace_times, t, side="right")) - 1))]
+            done = row["completed"]
+            draw.text(
+                (12, padding + 2 * line_height),
+                f"Phase: {row['phase']} | In bin: marker={done['marker']}, sock={done['sock']}",
                 font=font,
                 fill="white",
             )

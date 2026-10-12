@@ -5,8 +5,9 @@
 
 """Collect a rigid marker and a deformable sock in a child bedroom.
 
-The mouth, carrying head pose, and task sequencer are scripted. This is not a newly trained
-pick-and-place policy. Optional, explicitly labeled assistance pins a small sock patch
+The default mouth, carrying head pose, and task sequencer are scripted. The optional
+object-grasp actor learns body and jaw control; navigation and release remain scripted.
+Optional, explicitly labeled assistance pins a small sock patch
 while the jaw is closed. The marker always uses contact-only grasping.
 """
 
@@ -27,6 +28,8 @@ from play import _create_video_writer, _simulation_cfg, load_policies
 
 from isaaclab.app import add_launcher_args, launch_simulation
 
+from isaaclab_tasks.contrib.microduck.constants import MARKER_SUPPORT_SIZE, MARKER_SUPPORT_Y
+
 if TYPE_CHECKING:
     from pxr import Usd
 
@@ -44,12 +47,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--standing_policy", type=Path, help="Override the standing body actor.")
     parser.add_argument("--pickup_policy", type=Path, help="Override the phase-conditioned pickup body actor.")
+    parser.add_argument("--grasp_policy", type=Path, help="Use a trained object-conditioned body/jaw actor.")
     parser.add_argument("--scene_dir", type=Path, default=Path("logs/microduck/marker_pick/assets_lip"))
     parser.add_argument("--output_dir", type=Path, default=Path("logs/microduck/room_cleanup/probe_01"))
     parser.add_argument("--room_dir", type=Path, default=Path("logs/microduck/room_cleanup/assets"))
     parser.add_argument("--mode", choices=("cleanup", "marker", "sock", "navigate"), default="cleanup")
     parser.add_argument("--first_object", choices=("marker", "sock"), default="marker")
-    parser.add_argument("--physics_substeps", type=int, default=4)
+    parser.add_argument("--physics_substeps", type=int, help="Defaults to 8 for learned grasping and 4 otherwise.")
     parser.add_argument("--cloth_iterations", type=int, default=30)
     parser.add_argument(
         "--coupling_relaxation",
@@ -76,10 +80,15 @@ def parse_args() -> argparse.Namespace:
         help="Save measured body and cloth poses at 50 Hz for offline RTX rendering.",
     )
     parser.add_argument("--record", type=Path)
+    parser.add_argument(
+        "--live_state", type=Path, help="Atomically publish measured states for a live multi-room viewer."
+    )
     parser.add_argument("--offscreen", action="store_true")
     parser.add_argument("--real_time", action="store_true")
     add_launcher_args(parser)
     args = parser.parse_args()
+    if args.physics_substeps is None:
+        args.physics_substeps = 8 if args.grasp_policy else 4
     if not all(math.isfinite(v) for v in (args.duration, args.marker_x, args.support_height, args.sock_y)):
         parser.error("Numeric options must be finite.")
     if not math.isfinite(args.coupling_relaxation) or not 0.0 <= args.coupling_relaxation <= 1.0:
@@ -160,15 +169,23 @@ def _configure_assisted_beak_proxy(cfg: CouplerProxyCfg, *, enabled: bool) -> No
 
 def _load_body_policies(args: argparse.Namespace):
     """Load body actors and verify the training provenance embedded in their exports."""
-    policy_paths = {
-        name: args.asset_dir / f"{name}.onnx"
-        for name in ("alpha_stand", "alpha_ground_pick", "alpha_walking", "velstand")
-    }
+    policy_paths = {name: args.asset_dir / f"{name}.onnx" for name in ("alpha_stand", "alpha_ground_pick")}
     if args.standing_policy:
         policy_paths["alpha_stand"] = args.standing_policy
     if args.pickup_policy:
         policy_paths["alpha_ground_pick"] = args.pickup_policy
-    policies = load_policies(policy_paths)
+    if args.grasp_policy:
+        from grasp_playback import load_grasp_policy
+
+        policy_paths.pop("alpha_ground_pick")
+        policies = load_policies(policy_paths)
+        policies["alpha_ground_pick"] = load_grasp_policy(args.grasp_policy)
+        policy_paths["alpha_ground_pick"] = args.grasp_policy
+        stand = policies["alpha_stand"].get_modelmeta().custom_metadata_map
+        if stand.get("training_backend") != "isaaclab_newton" or stand.get("initialization") != "random":
+            raise ValueError("Object grasp mode requires --standing_policy from scratch Isaac training.")
+    else:
+        policies = load_policies(policy_paths)
     policy_provenance = {
         name: {
             "path": str(path.resolve()),
@@ -186,6 +203,14 @@ def _load_body_policies(args: argparse.Namespace):
     return policies, policy_provenance, native_body_skills
 
 
+def adapt_skill_command(command: list[float], metadata: dict[str, str]) -> list[float]:
+    """Supply the trained reach-depth fraction without changing phase timing."""
+    adapted = command.copy()
+    if metadata.get("command_contract") == "phase_cos_sin_depth":
+        adapted[2] = 1.0
+    return adapted
+
+
 def main() -> None:
     """Run contact-based pickup, transport, release, and measured bin settlement."""
     args = parse_args()
@@ -196,6 +221,7 @@ def main() -> None:
         for name in (
             "room_cleanup.py",
             "cleanup_sequence.py",
+            "grasp_playback.py",
             "room_assets.py",
             "beak_grasp.py",
             "assisted_grasp.py",
@@ -357,10 +383,12 @@ def main() -> None:
         bin_center = np.array([0.38, 0.13, 0.0])
         bin_cfg = sim_utils.UsdFileCfg(usd_path=str((args.room_dir / "cleanup_bin.usda").resolve()))
         bin_cfg.func("/World/Bin", bin_cfg, translation=tuple(bin_center))
-        for index, y in enumerate((0.006,)):
+        marker_support_y = tuple(0.006 + offset for offset in MARKER_SUPPORT_Y) if args.grasp_policy else (0.006,)
+        marker_support_xy = MARKER_SUPPORT_SIZE[:2] if args.grasp_policy else (0.024, 0.016)
+        for index, y in enumerate(marker_support_y):
             if args.support_height > 0:
                 support = sim_utils.CuboidCfg(
-                    size=(0.024, 0.016, args.support_height),
+                    size=(*marker_support_xy, args.support_height),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.35, 0.36, 0.40)),
                 )
@@ -432,6 +460,9 @@ def main() -> None:
         if len(colors) == NewtonManager._model.tri_count:
             wp.to_torch(NewtonManager._model.tri_color).copy_(torch.tensor(colors, device=cfg.device))
         controller = MicroDuckController(robot, params, solver=NewtonManager._solver.solver("rigid"))
+        from grasp_playback import MicroDuckGraspPlayback, infer_cleanup_action
+
+        grasp_actor = MicroDuckGraspPlayback(policies["alpha_ground_pick"], controller) if args.grasp_policy else None
         jaw_ids = robot.find_joints("mouth")[0]
         head_id = robot.find_bodies("jaw_soft")[0][0]
         robot.write_root_pose_to_sim_index(
@@ -492,6 +523,7 @@ def main() -> None:
             sock_y=args.sock_y,
             sock_folded=args.sock_shape == "folded",
             sock_close_time_s=args.sock_close_time,
+            object_conditioned_pick=grasp_actor is not None,
             bin_geometry=bin_geometry,
             bin_center=bin_center,
         )
@@ -509,7 +541,7 @@ def main() -> None:
             if "/Marker/" in label
         }
         node_frames = []
-        recording = CleanupRecording(args.record_states, robot.body_names)
+        recording = CleanupRecording(args.record_states, robot.body_names, args.live_state)
         bin_geom_ids = [i for i in range(model.ngeom) if "Bin/" in model.geom(i).name]
         robot_geom_ids = [i for i in range(model.ngeom) if "Robot/" in model.geom(i).name]
         maximum_robot_bin_penetration = 0.0
@@ -647,7 +679,20 @@ def main() -> None:
                         yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
                         if sequence.phase != "pick" and (root[2] < 0.065 or 1 - 2 * (qx * qx + qy * qy) < 0.45):
                             sequence.phase, sequence.phase_start = "robot_fell", t
-                        policy, command, jaw_target = sequence.step(t, root[:3], yaw, objects)
+                        policy, command, jaw_target = sequence.step(
+                            t,
+                            root[:3],
+                            yaw,
+                            objects,
+                            learned_grasp_ready=bool(
+                                grasp_actor and grasp_actor.target == sequence.target and grasp_actor.ready
+                            ),
+                        )
+                        policy = (
+                            "alpha_ground_pick"
+                            if grasp_actor is not None and sequence.phase == "lift_check"
+                            else policy
+                        )
                         # Leave room for the seated fabric instead of closing through it.
                         jaw_target = (
                             ASSISTED_JAW_ANGLE
@@ -690,15 +735,33 @@ def main() -> None:
                             release_pitch = command[4] if sequence.phase == "drop" else 0.0
                             command[3:7] = head_anchor[0].tolist()
                             command[4] += release_pitch
+                        command = adapt_skill_command(command, policies[policy].get_modelmeta().custom_metadata_map)
                         controller.command[0] = torch.tensor(command, device=cfg.device)
                         observation = controller.observations()
                         if not all(torch.isfinite(value).all() for value in (observation, marker_pos, nodes)):
                             raise RuntimeError("Non-finite robot, marker, or cloth state")
                         controller.training_model = policy == "native_walking"
                         session = policies[policy]
-                        action = session.run(None, {session.get_inputs()[0].name: observation.cpu().numpy()})[0]
+                        action, jaw_target = infer_cleanup_action(
+                            session,
+                            observation,
+                            jaw_target,
+                            grasp=grasp_actor,
+                            policy_name=policy,
+                            target=sequence.target,
+                            marker=marker,
+                            sock=sock,
+                            marker_contacts=contact_names,
+                            sock_opposed=sock_opposed,
+                            assistance=assistance,
+                        )
                         raw_head_action = action[0, 5:9].tolist()
-                        if policy == "alpha_ground_pick" and sequence.target == "sock" and args.align_beak:
+                        if (
+                            grasp_actor is None
+                            and policy == "alpha_ground_pick"
+                            and sequence.target == "sock"
+                            and args.align_beak
+                        ):
                             if grasp_point is None:
                                 section = nodes[(nodes[:, 1] - objects["sock"].center[1]).abs() < 0.012]
                                 grasp_point = (section.mean(0) if len(section) else nodes.mean(0)).cpu().numpy()
@@ -727,7 +790,9 @@ def main() -> None:
                         robot.actuators.target_command.set_position_index(
                             value=torch.tensor([[jaw_target]], device=cfg.device), joint_ids=jaw_ids
                         )
-                        recording.append(t, robot, marker, nodes, bool(assistance and assistance.active))
+                        recording.append(
+                            t, robot, marker, nodes, bool(assistance and assistance.active), phase=phase, policy=policy
+                        )
                         trace.write(
                             json.dumps(
                                 {
@@ -736,6 +801,10 @@ def main() -> None:
                                     "policy": policy,
                                     "command": command,
                                     "raw_head_action": raw_head_action,
+                                    "learned_grasp_stage": int(grasp_actor.progress.stage[0]) if grasp_actor else None,
+                                    "learned_jaw_target_rad": jaw_target
+                                    if grasp_actor and policy == "alpha_ground_pick"
+                                    else None,
                                     "basket_reach_fraction": basket_reach.strength,
                                     "applied_head_action": action[0, 5:9].tolist(),
                                     "actual_velocity_m_s": robot.data.root_link_lin_vel_b.torch[0].tolist(),
@@ -843,14 +912,26 @@ def main() -> None:
                 "head_frame_max_error_m": beak.maximum_frame_error if args.align_beak else None,
                 "sock_center_m": objects["sock"].center.tolist() if objects else None,
                 "controller": (
-                    "Isaac Lab-trained standing, pickup, and walking; scripted head, jaw, and sequence"
+                    "Isaac-only standing, object-grasp body/jaw, and walking; scripted navigation and release"
+                    if grasp_actor is not None
+                    else "Isaac Lab-trained standing, pickup, and walking; scripted head, jaw, and sequence"
                     if native_body_skills
                     else "released or overridden body skills and native walking; scripted head, jaw, and sequence"
                 ),
                 "policy_provenance": policy_provenance,
                 "walking_policy": str(native_path.resolve()),
+                "walking_provenance": {
+                    "sha256": hashlib.sha256(native_path.read_bytes()).hexdigest(),
+                    "metadata": policies["native_walking"].get_modelmeta().custom_metadata_map,
+                },
                 "native_body_skills": native_body_skills,
+                "scratch_body_skills": all(
+                    item["metadata"].get("initialization")
+                    in {"random", "continued_isaac_scratch_standing", "random_geometric_output_bias"}
+                    for item in policy_provenance.values()
+                ),
                 "new_cleanup_policy_trained": False,
+                "learned_object_grasp_used": grasp_actor is not None,
                 "physics_dt_s": cfg.dt,
                 "policy_dt_s": 4 * cfg.dt,
                 "robot_upright": bool(root[2] > 0.075 and 1 - 2 * (root[3] ** 2 + root[4] ** 2) > 0.7),

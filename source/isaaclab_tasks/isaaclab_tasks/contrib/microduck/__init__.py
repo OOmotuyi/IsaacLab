@@ -30,3 +30,28 @@ for task, config in (("Stand", "MicroDuckStandEnvCfg"), ("Ground-Pick", "MicroDu
             "default_agent": "rsl_rl",
         },
     )
+
+
+for task, config in (("Stand", "MicroDuckStandScratchEnvCfg"), ("Ground-Pick", "MicroDuckPickupScratchEnvCfg")):
+    gym.register(
+        id=f"IsaacContrib-MicroDuck-{task}-Scratch",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.skill_env_cfg:{config}",
+            "rsl_rl_cfg_entry_point": f"{__name__}.agents:MicroDuckScratchPPORunnerCfg",
+            "default_agent": "rsl_rl",
+        },
+    )
+
+
+gym.register(
+    id="IsaacContrib-MicroDuck-Marker-Grasp-Scratch",
+    entry_point=f"{__name__}.microduck_env:MicroDuckGraspEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.grasp_env_cfg:MicroDuckMarkerGraspEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents:MicroDuckGraspPPORunnerCfg",
+        "default_agent": "rsl_rl",
+    },
+)

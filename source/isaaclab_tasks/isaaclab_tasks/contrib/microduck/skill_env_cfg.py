@@ -26,7 +26,7 @@ _ROOT = Path(__file__).parents[5]
 @configclass
 class MicroDuckSkillActionCfg(MicroDuckActionCfg):
     class_type = _SKILLS + "MicroDuckSkillAction"
-    teacher_path: str = str(_ASSETS / "alpha_stand.onnx")
+    teacher_path: str | None = str(_ASSETS / "alpha_stand.onnx")
     delay_steps = (0, 0)
     battery_range = (7.3, 7.5)
     sag_range = (0.1, 0.1)
@@ -38,7 +38,14 @@ class MicroDuckSkillCommandCfg(CommandTermCfg):
     class_type = _SKILLS + "MicroDuckSkillCommand"
     resampling_time_range = (100.0, 100.0)
     skill: str = "stand"
-    reference_path: str = os.environ.get("MICRODUCK_SKILL_REFERENCE", str(_ASSETS / "pickup_reference.json"))
+    reference_path: str | None = os.environ.get("MICRODUCK_SKILL_REFERENCE", str(_ASSETS / "pickup_reference.json"))
+
+    reference_times: tuple[float, ...] = ()
+    """Hand-authored waypoint times [s], used only when reference_path is None."""
+    reference_poses: tuple[tuple[float, ...], ...] = ()
+    """Beak xyz [m], projected gravity, and trunk height [m] per waypoint."""
+    reach_ramp_steps: tuple[int, int] | None = None
+    """Control steps over which pickup depth grows; None uses full depth."""
 
 
 @configclass
@@ -115,3 +122,40 @@ class MicroDuckPickupEnvCfg(MicroDuckStandEnvCfg):
         super().__post_init__()
         self.actions.joint_pos.teacher_path = str(_ASSETS / "alpha_ground_pick.onnx")
         self.commands.twist.skill = "pickup"
+
+
+@configclass
+class MicroDuckStandScratchEnvCfg(MicroDuckStandEnvCfg):
+    """Learn standing without pretrained actors or a source-action reward."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.actions.joint_pos.teacher_path = None
+        self.commands.twist.reference_path = None
+        self.rewards.source_prior = None
+        self.rewards.head_target.params = {"std": (0.05, 0.03, 0.04)}
+        self.rewards.height.params = {"std": 0.03}
+        self.rewards.action_rate.weight = -0.01
+
+
+@configclass
+class MicroDuckPickupScratchEnvCfg(MicroDuckStandScratchEnvCfg):
+    """Learn a geometric reach/return cycle; no object or grasp is simulated."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.twist.skill = "pickup"
+        self.commands.twist.reference_times = (0.0, 0.6, 1.4, 2.0, 2.8)
+        # Geometric goals: lower the beak while crouching, then return upright.
+        self.commands.twist.reference_poses = (
+            (0.075, 0.0, 0.215, 0.0, 0.0, -1.0, 0.116),
+            (0.100, 0.0, 0.130, 0.389418, 0.0, -0.921061, 0.105),
+            (0.130, 0.0, 0.065, 0.717356, 0.0, -0.696707, 0.085),
+            (0.100, 0.0, 0.130, 0.389418, 0.0, -0.921061, 0.105),
+            (0.075, 0.0, 0.215, 0.0, 0.0, -1.0, 0.116),
+        )
+        self.commands.twist.reach_ramp_steps = (2400, 36000)
+
+    def play_mode(self):
+        super().play_mode()
+        self.commands.twist.reach_ramp_steps = None

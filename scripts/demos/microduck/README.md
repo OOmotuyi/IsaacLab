@@ -574,3 +574,61 @@ The adjacent JSON records input hashes, body mappings, and sampled replay errors
 `--frames 3` provides a short capture check. Native GUI statistics describe the
 replay model; the cloth is drawn from recorded vertices as a dynamic mesh, so it
 does not appear in the model's particle or triangle counts.
+
+
+## Scratch-trained cleanup body actors
+
+Export the standing/reaching checkpoints with their empirical observation normalizers:
+
+```bash
+uv run --extra microduck python scripts/demos/microduck/skill_checkpoint.py \
+  --from_scratch --skill stand --checkpoint /absolute/experiment/training/stand/RUN/model_2999.pt \
+  --output /absolute/experiment/exports/stand.onnx
+uv run --extra microduck python scripts/demos/microduck/skill_checkpoint.py \
+  --from_scratch --skill pickup --checkpoint /absolute/experiment/training/reach/RUN/model_2999.pt \
+  --output /absolute/experiment/exports/pickup.onnx
+```
+
+The exporter checks the experiment's random-initialization provenance, saved teacher-free
+configuration, optimizer updates, and normalized ONNX parity. Supply these files through
+`room_cleanup.py --standing_policy ... --pickup_policy ...`. The runner reads the scratch
+reaching command contract from ONNX metadata and supplies its full-depth command.
+The existing native walking actor provides locomotion. Only the body skills are learned;
+approach goals, skill switching, jaw control, carrying head adjustments, and optional
+sock grasp assistance remain scripted. A successful reaching training episode does not
+prove pickup or cleanup success: check measured `objects_in_bin` and `cleanup_complete`.
+Both recording tools label scratch actors and show actual cleanup progress.
+
+
+## Live parallel cleanup rooms
+
+`room_parallel.py` starts complete, independent Isaac Lab physics processes and
+shows their live measured states in one Newton GUI. Each worker has the full
+bedroom, robot, marker, VBD sock, bin, and scratch-policy controller. This is
+process parallelism, not a vectorized manager-based cleanup training environment.
+The viewer never drives the physics and does not replay the reference trajectory;
+the reference run supplies scene geometry, policy paths, and starting visual poses
+while workers initialize. Atomic state streams then replace those initial poses.
+
+```bash
+OMNI_KIT_ACCEPT_EULA=YES uv run --extra microduck --extra video python scripts/demos/microduck/room_parallel.py \
+  --reference_run /absolute/scratch-video-results/baseline \
+  --output_dir /absolute/scratch-video-results/parallel --num_rooms 4
+```
+
+The native GUI exposes per-room phase/time and focus buttons. It saves a live-view
+video, each worker's actual trajectory/metrics, commands/PIDs, and a parallel report.
+A worker finishing without a Python error does not mean cleanup succeeded: inspect
+its `metrics.json` for object containment and robot posture.
+
+## Experimental learned body and jaw grasp
+
+The new object-conditioned grasp actor is separate from the earlier geometric
+reaching skill. See the [task and training contract](../../../source/isaaclab_tasks/isaaclab_tasks/contrib/microduck/README.md#object-conditioned-marker-grasp-training).
+A verified export can be supplied with `--grasp_policy PATH` to `room_cleanup.py`,
+alongside `--standing_policy PATH` from scratch Isaac training. This mode waits
+for measured contact and lift instead of the old pickup clock. The marker rests
+on two narrow end supports, leaving the central grasp region clear. It preserves
+scripted navigation/release and the optional, explicitly labeled sock assistance.
+Its end-to-end cleanup performance must be evaluated; the integration itself is
+not evidence of a successful learned pickup.

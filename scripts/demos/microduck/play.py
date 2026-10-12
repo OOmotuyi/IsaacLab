@@ -156,7 +156,8 @@ def main() -> None:
 
         import isaaclab.sim as sim_utils
         from isaaclab.actuators import ImplicitActuatorCfg
-        from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
+        from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg, RigidObject, RigidObjectCfg
+        from isaaclab.cloner import make_clone_plan, replicate
         from isaaclab.sim import SimulationContext
         from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
 
@@ -217,6 +218,9 @@ def main() -> None:
                 Gf.Vec3f(1.225e-5, 1.225e-5, 1.225e-5)
             )
         pickup = PickupTarget(robot, args.asset_dir / "source" / "robot" / f"{profile.robot}.xml", args.pickup_object)
+        plan = make_clone_plan((AssetBaseCfg(prim_path="/World"),), ((),), 1, shared_assets=(0,))
+        sim.set_clone_plan(plan)
+        replicate(plan)
         sim.reset()
         controller = MicroDuckController(robot, params)
         wheel_ids = robot.find_joints("passive_.*")[0] if profile.rollers else []

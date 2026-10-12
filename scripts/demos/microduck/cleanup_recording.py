@@ -21,8 +21,11 @@ if TYPE_CHECKING:
 class CleanupRecording:
     """Optional 50 Hz world-pose [m, xyzw] and cloth-vertex [m] recording."""
 
-    def __init__(self, enabled: bool, body_names: list[str]):
+    def __init__(self, enabled: bool, body_names: list[str], live_path: Path | None = None):
         self.enabled = enabled
+        self.live_path = live_path
+        if live_path is not None:
+            live_path.parent.mkdir(parents=True, exist_ok=True)
         self.body_names = body_names
         self.times: list[float] = []
         self.bodies: list[np.ndarray] = []
@@ -31,9 +34,32 @@ class CleanupRecording:
         self.assistance: list[bool] = []
 
     def append(
-        self, time: float, robot: Articulation, marker: RigidObject, nodes: torch.Tensor, assistance_active: bool
+        self,
+        time: float,
+        robot: Articulation,
+        marker: RigidObject,
+        nodes: torch.Tensor,
+        assistance_active: bool,
+        *,
+        phase: str = "",
+        policy: str = "",
     ) -> None:
-        """Copy the measured state at simulation time [s], only when enabled."""
+        """Publish live state and optionally retain a sample at simulation time [s]."""
+        if self.live_path is not None:
+            temporary = self.live_path.with_suffix(".tmp")
+            with temporary.open("wb") as stream:
+                np.savez(
+                    stream,
+                    time_s=time,
+                    body_names=self.body_names,
+                    body_pose_m_xyzw=robot.data.body_link_pose_w.torch[0].cpu().numpy(),
+                    marker_pose_m_xyzw=marker.data.root_link_pose_w.torch[0].cpu().numpy(),
+                    cloth_points_m=nodes.cpu().numpy(),
+                    assistance_active=assistance_active,
+                    phase=phase,
+                    policy=policy,
+                )
+            temporary.replace(self.live_path)
         if not self.enabled:
             return
         self.times.append(time)

@@ -64,6 +64,8 @@ class CleanupSequence:
     sock_folded: bool = False
     sock_close_time_s: float = 0.7
     """Time after pickup begins to command jaw closure [s]."""
+    object_conditioned_pick: bool = False
+    """Use a learned object-grasp completion signal instead of the phase clock."""
     bin_center: np.ndarray = field(default_factory=lambda: np.array([0.38, 0.13, 0.0]))
     bin_geometry: BinGeometry = field(default_factory=BinGeometry)
     phase: str = "settle"
@@ -180,8 +182,30 @@ class CleanupSequence:
             self._transition("grasp_failed", t)
         return command
 
+    def _pick(self, t: float, obj: PickupState, learned_grasp_ready: bool) -> tuple[float, float, bool]:
+        """Return phase time [s], jaw target [rad], and measured/timed pickup completion."""
+        elapsed = t - self.phase_start
+        jaw = MOUTH_OPEN
+        if self.object_conditioned_pick:
+            phase_time, finished = 0.0, learned_grasp_ready
+            if elapsed > 12.0 and not finished:
+                self._transition("grasp_failed", t)
+        elif self.target == "sock":
+            phase_time, jaw, finished = self._sock_pick(t, obj)
+        else:
+            phase_time = min(elapsed, 1.4) + max(0.0, elapsed - 2.4)
+            jaw = MOUTH_CLOSED if elapsed >= 1.5 else MOUTH_OPEN
+            finished = phase_time >= 2.8
+        return phase_time, jaw, finished
+
     def step(
-        self, t: float, root: np.ndarray, yaw: float, objects: dict[str, PickupState]
+        self,
+        t: float,
+        root: np.ndarray,
+        yaw: float,
+        objects: dict[str, PickupState],
+        *,
+        learned_grasp_ready: bool = False,
     ) -> tuple[str, list[float], float]:
         """Return skill, 13-value command, and jaw angle [rad] every 0.02 [s]."""
         obj = objects[self.target]
@@ -207,12 +231,7 @@ class CleanupSequence:
             policy, command = self._prepare_pick(t, root, yaw, obj)
         elif self.phase == "pick":
             policy = "alpha_ground_pick"
-            if self.target == "sock":
-                phase_time, jaw, finished = self._sock_pick(t, obj)
-            else:
-                phase_time = min(elapsed, 1.4) + max(0.0, elapsed - 2.4)
-                jaw = MOUTH_CLOSED if elapsed >= 1.5 else MOUTH_OPEN
-                finished = phase_time >= 2.8
+            phase_time, jaw, finished = self._pick(t, obj, learned_grasp_ready)
             command[:2] = [math.cos(2 * math.pi * phase_time / 4), math.sin(2 * math.pi * phase_time / 4)]
             if finished:
                 self._transition("lift_check", t)

@@ -34,25 +34,44 @@ class MicroDuckSkillCommand(CommandTerm):
             self.num_envs, 1
         )
         if cfg.skill == "pickup":
-            reference = json.loads(Path(cfg.reference_path).read_text())
+            if cfg.reference_path is None:
+                reference = {"phase_s": cfg.reference_times, "reference": cfg.reference_poses}
+            else:
+                reference = json.loads(Path(cfg.reference_path).read_text())
             self.times = torch.tensor(reference["phase_s"], device=self.device)
             self.poses = torch.tensor(reference["reference"], device=self.device)
-            if not bool((self.times[1:] > self.times[:-1]).all()) or self.poses.shape != (len(self.times), 7):
+            if (
+                len(self.times) < 2
+                or not bool((self.times[1:] > self.times[:-1]).all())
+                or self.poses.shape != (len(self.times), 7)
+            ):
                 raise ValueError("Pickup reference requires increasing phase times and seven pose values.")
+        self.geometric_reference = cfg.reference_path is None and cfg.skill == "pickup"
         self.metrics["head_error_m"] = torch.zeros(self.num_envs, device=self.device)
 
     @property
     def command(self) -> torch.Tensor:
         return self._command
 
-    def _resample_command(self, env_ids: torch.Tensor) -> None:
-        self.style[env_ids] = torch.rand(len(env_ids), device=self.device) < 0.5
+    def _resample_command(self, env_ids: torch.Tensor | slice) -> None:
+        num_envs = len(range(self.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
+        self.style[env_ids] = torch.rand(num_envs, device=self.device) < 0.5
         self.phase[env_ids] = 0
         self._command[env_ids] = 0
         self.jaw_target[env_ids] = math.pi / 6
         if self.cfg.skill == "pickup":
             self._command[env_ids, 0] = 1
+            if self.geometric_reference:
+                self._command[env_ids, 2] = self._reach_fraction()
             self.reference_pose[env_ids] = self.poses[0]
+
+    def _reach_fraction(self) -> float:
+        if self.cfg.reach_ramp_steps is None:
+            return 1.0
+        start, end = self.cfg.reach_ramp_steps
+        if end <= start:
+            raise ValueError("Reach curriculum end must exceed its start step.")
+        return min(1.0, max(0.0, (self._env.common_step_counter - start) / (end - start)))
 
     def _update_metrics(self) -> None:
         self.metrics["head_error_m"].copy_((skill_head_position(self._env) - self.reference_pose[:, :3]).norm(dim=-1))
@@ -70,6 +89,13 @@ class MicroDuckSkillCommand(CommandTerm):
         lower = upper - 1
         blend = ((self.phase - self.times[lower]) / (self.times[upper] - self.times[lower])).clamp(0, 1)
         self.reference_pose.copy_(torch.lerp(self.poses[lower], self.poses[upper], blend[:, None]))
+        if self.geometric_reference:
+            fraction = self._reach_fraction()
+            self._command[:, 2] = fraction
+            self.reference_pose.copy_(torch.lerp(self.poses[0], self.reference_pose, fraction))
+            # Interpolated gravity directions must remain unit vectors.
+            gravity = self.reference_pose[:, 3:6]
+            gravity.div_(gravity.norm(dim=-1, keepdim=True).clamp_min(1e-6))
         closed = (elapsed >= torch.where(self.style, 0.7, 1.5)) & (elapsed < 4.5)
         hold = torch.where(self.style, 0.18, -math.pi / 36)
         self.jaw_target[:, 0] = torch.where(closed, hold, math.pi / 6)
@@ -81,7 +107,9 @@ class MicroDuckSkillAction(MicroDuckAction):
     def __init__(self, cfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
         self.controller.training_model = False
-        self.teacher = MicroDuckSourceActor(cfg.teacher_path).to(self.device).eval()
+        self.teacher = None
+        if cfg.teacher_path is not None:
+            self.teacher = MicroDuckSourceActor(cfg.teacher_path).to(self.device).eval()
         self.teacher_action = torch.zeros_like(self._raw_actions)
         self.jaw_ids = self._asset.find_joints("mouth")[0]
         self._env = env
@@ -91,8 +119,9 @@ class MicroDuckSkillAction(MicroDuckAction):
         self.controller.command.copy_(
             torch.cat([commands.get_command(name) for name in ("twist", "head_pose", "body_pose")], -1)
         )
-        with torch.no_grad():
-            self.teacher_action.copy_(self.teacher(self.controller.observations()))
+        if self.teacher is not None:
+            with torch.no_grad():
+                self.teacher_action.copy_(self.teacher(self.controller.observations()))
         super().process_actions(actions)
 
     def apply_actions(self) -> None:
@@ -115,10 +144,10 @@ def skill_head_position(env: ManagerBasedRLEnv) -> torch.Tensor:
     return quat_apply_inverse(yaw_quat(robot.data.root_link_quat_w.torch), point - origin)
 
 
-def skill_head_tracking(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Reward the measured phase-conditioned beak target [m]."""
+def skill_head_tracking(env: ManagerBasedRLEnv, std: tuple[float, float, float] = (0.03, 0.02, 0.015)) -> torch.Tensor:
+    """Reward the beak target, with axis-wise error scales ``std`` [m]."""
     target = env.command_manager.get_term("twist").reference_pose[:, :3]
-    error = (skill_head_position(env) - target) / target.new_tensor([0.03, 0.02, 0.015])
+    error = (skill_head_position(env) - target) / target.new_tensor(std)
     return torch.exp(-error.square().mean(-1))
 
 
@@ -128,16 +157,18 @@ def skill_balance(env: ManagerBasedRLEnv) -> torch.Tensor:
     return torch.exp(-(env.scene["robot"].data.projected_gravity_b.torch - target).square().sum(-1) / 0.05)
 
 
-def skill_height(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Reward phase-conditioned trunk height [m]."""
+def skill_height(env: ManagerBasedRLEnv, std: float = 0.015) -> torch.Tensor:
+    """Reward trunk height with error scale ``std`` [m]."""
     target = env.command_manager.get_term("twist").reference_pose[:, 6]
     actual = env.scene["robot"].data.root_link_pos_w.torch[:, 2] - env.scene.env_origins[:, 2]
-    return torch.exp(-((actual - target) / 0.015).square())
+    return torch.exp(-((actual - target) / std).square())
 
 
 def skill_source_prior(env: ManagerBasedRLEnv) -> torch.Tensor:
     """Regularize body actions toward the released actor during PPO fine-tuning."""
     action = env.action_manager.get_term("joint_pos")
+    if action.teacher is None:
+        raise ValueError("The source-action prior requires a teacher policy.")
     return 1.0 - (action.raw_actions - action.teacher_action).square().mean(-1) / 0.0025
 
 

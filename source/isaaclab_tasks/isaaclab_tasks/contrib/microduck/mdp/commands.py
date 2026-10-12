@@ -17,7 +17,9 @@ from isaaclab.managers import CommandTerm, CommandTermCfg
 class MicroDuckVelocityCommand(UniformVelocityCommand):
     """Include the upstream 15% turn-in-place command bucket."""
 
-    def _resample_command(self, env_ids: torch.Tensor) -> None:
+    def _resample_command(self, env_ids: torch.Tensor | slice) -> None:
+        if isinstance(env_ids, slice):
+            env_ids = torch.arange(self.num_envs, device=self.device)[env_ids]
         super()._resample_command(env_ids)
         turn = torch.rand(len(env_ids), device=self.device) < self.cfg.turn_in_place_fraction
         turn_ids = env_ids[turn & ~self.is_standing_env[env_ids]]
@@ -38,9 +40,10 @@ class MicroDuckPoseCommand(CommandTerm):
     def command(self) -> torch.Tensor:
         return self._command
 
-    def _resample_command(self, env_ids: torch.Tensor) -> None:
+    def _resample_command(self, env_ids: torch.Tensor | slice) -> None:
+        num_envs = len(range(self.num_envs)[env_ids]) if isinstance(env_ids, slice) else len(env_ids)
         for index, limits in enumerate(self.cfg.ranges):
-            self._command[env_ids, index] = torch.empty(len(env_ids), device=self.device).uniform_(*limits)
+            self._command[env_ids, index] = torch.empty(num_envs, device=self.device).uniform_(*limits)
 
     def _update_metrics(self) -> None:
         pass

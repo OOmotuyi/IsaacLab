@@ -57,3 +57,35 @@ class MicroDuckSkillPPORunnerCfg(MicroDuckPPORunnerCfg):
         self.algorithm.entropy_coef = 0.0
         self.algorithm.num_learning_epochs = 4
         self.algorithm.max_grad_norm = 0.2
+
+
+@configclass
+class MicroDuckScratchPPORunnerCfg(MicroDuckPPORunnerCfg):
+    """Train body skills from random actor and critic weights without resuming."""
+
+    max_iterations = 3000
+    save_interval = 100
+    experiment_name = "microduck_cleanup_scratch"
+    init_at_random_ep_len = False
+    resume = False
+
+    def __post_init__(self):
+        self.actor.distribution_cfg.init_std = 0.15
+        self.algorithm.learning_rate = 3e-4
+        self.algorithm.entropy_coef = 0.002
+
+
+@configclass
+class MicroDuckGraspPPORunnerCfg(MicroDuckScratchPPORunnerCfg):
+    """PPO for object-conditioned body and jaw control with Isaac-only lineage."""
+
+    max_iterations = 3000
+    save_interval = 100
+    experiment_name = "microduck_grasp_scratch"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.actor.distribution_cfg.init_std = 0.025
+        self.algorithm.entropy_coef = 0.003
+        self.algorithm.learning_rate = 1e-4
+        self.algorithm.desired_kl = 0.005

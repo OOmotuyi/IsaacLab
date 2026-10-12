@@ -22,3 +22,7 @@ JOINT_NAMES = (
     "right_ankle",
 )
 DEFAULT_POSE = (0.0, -0.0873, -0.4579, -0.0049, 0.4530, 0.3491, 0.3491, 0.0, 0.0, 0.0, 0.0873, 0.4579, 0.0049, -0.4530)
+
+# End supports leave the 82 mm wide mouth clear beneath the marker center.
+MARKER_SUPPORT_SIZE = (0.014, 0.004, 0.030)
+MARKER_SUPPORT_Y = (-0.047, 0.047)
