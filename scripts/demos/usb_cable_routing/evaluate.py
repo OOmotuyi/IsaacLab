@@ -20,6 +20,7 @@ import torch
 import warp as wp
 
 from isaaclab.app import launch_simulation
+from isaaclab.visualizers import WindowCfg
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_rl.rsl_rl.utils import handle_deprecated_rsl_rl_cfg
@@ -95,8 +96,7 @@ if args.viz != "none" or args.video:
         visualizer_type(
             eye=(0.94, 0.40, 0.72) if args.task_view else (1.45, 0.55, 1.20),
             lookat=(0.44, -0.09, 0.09) if args.task_view else (0.40, -0.35, 0.32),
-            window_width=1280,
-            window_height=720,
+            window=WindowCfg(size=(1280, 720)),
             headless=args.headless or args.viz == "none",
         )
     ]

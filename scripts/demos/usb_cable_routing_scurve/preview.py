@@ -20,6 +20,7 @@ from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 
 from isaaclab.app import launch_simulation
 from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
+from isaaclab.visualizers import WindowCfg
 
 from isaaclab_tasks.contrib.usb_cable_routing.assets import ANCHOR, CABLE_LENGTH, SEGMENTS
 from isaaclab_tasks.contrib.usb_cable_routing_scurve.assets import (
@@ -68,8 +69,7 @@ def main() -> None:
         NewtonGLVisualizerCfg(
             eye=EYE,
             lookat=LOOKAT,
-            window_width=1280,
-            window_height=720,
+            window=WindowCfg(size=(1280, 720)),
             headless=args.headless,
         )
     ]

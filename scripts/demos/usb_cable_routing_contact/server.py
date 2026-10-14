@@ -29,6 +29,7 @@ from PIL import Image
 
 from isaaclab.app import launch_simulation
 from isaaclab.utils.math import axis_angle_from_quat, quat_inv, quat_mul
+from isaaclab.visualizers import WindowCfg
 
 from isaaclab_tasks.contrib.usb_cable_routing_contact.observations import (
     CONTROLLER_FIELDS,
@@ -202,7 +203,7 @@ class ContactBridge(_RECORDER.DirectBridge):
             observation["final_success"] = bool(self.terminal["success"])
         elif image_requested:
             self.visualizer.set_camera_view(*_CAMERAS[camera])
-            self.visualizer._state = NewtonManager.get_state()
+            self.visualizer._state = NewtonManager.get_state_0()
             pixels = self.visualizer.render_rgb_array()
             path = self.image_directory / f"observation_{self.sequence:04d}_{camera}.png"
             Image.fromarray(pixels).save(path)
@@ -341,8 +342,7 @@ def build_task_cfg(
         NewtonGLVisualizerCfg(
             eye=_CAMERAS["routing"][0],
             lookat=_CAMERAS["routing"][1],
-            window_width=1280,
-            window_height=720,
+            window=WindowCfg(size=(1280, 720)),
             headless=False,
             enable_picking=False,
             enable_markers=False,

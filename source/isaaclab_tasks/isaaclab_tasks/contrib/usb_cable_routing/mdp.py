@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import warp as wp
 from isaaclab_newton.physics import NewtonManager
-from newton import ModelFlags
+from newton import JointType, ModelFlags
 
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
 from isaaclab.managers import CommandTerm
@@ -176,9 +176,14 @@ class RoutingCommand(CommandTerm):
         model = NewtonManager.get_model()
         joints = model.joint_label
         starts = model.joint_qd_start.numpy()
+        joint_types = model.joint_type.numpy()
         rows = []
         for env_id in range(self.num_envs):
-            indices = [j for j, label in enumerate(joints) if f"/env_{env_id}/Cable/" in label]
+            indices = [
+                j
+                for j, label in enumerate(joints)
+                if f"/env_{env_id}/Cable/" in label and joint_types[j] == int(JointType.ROD)
+            ]
             rows.append([k for j in indices for k in range(int(starts[j]), int(starts[j + 1]))])
         self.dof_ids = torch.tensor(rows, device=self.device, dtype=torch.long)
         self.base_stiffness = wp.to_torch(model.joint_target_ke)[self.dof_ids].clone()

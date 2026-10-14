@@ -96,7 +96,7 @@ class TestBenchmarkState(unittest.TestCase):
         )
         newton = types.ModuleType("isaaclab_newton")
         physics = types.ModuleType("isaaclab_newton.physics")
-        physics.NewtonManager = SimpleNamespace(get_model=lambda: self.model, get_state=lambda: self.state)
+        physics.NewtonManager = SimpleNamespace(get_model=lambda: self.model, get_state_0=lambda: self.state)
         self.addCleanup(patch.stopall)
         patch.dict(sys.modules, {"isaaclab_newton": newton, "isaaclab_newton.physics": physics}).start()
 

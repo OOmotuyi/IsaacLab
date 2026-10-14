@@ -20,6 +20,7 @@ import torch
 import warp as wp
 
 from isaaclab.app import launch_simulation
+from isaaclab.visualizers import WindowCfg
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_rl.rsl_rl.utils import handle_deprecated_rsl_rl_cfg
@@ -61,8 +62,7 @@ if args.viz != "none" or args.video:
         NewtonGLVisualizerCfg(
             eye=(1.25, -1.25, 1.05),
             lookat=(0.35, 0.04, 0.35),
-            window_width=1280,
-            window_height=720,
+            window=WindowCfg(size=(1280, 720)),
             headless=args.viz == "none",
         )
     ]

@@ -99,9 +99,9 @@ class UsbCable(CableObject):
     def _initialize_impl(self):
         super()._initialize_impl()
         model = NewtonManager.get_model()
-        parents = wp.to_torch(self.root_view.get_attribute("joint_parent", model).contiguous())[:, 0]
         children = wp.to_torch(self.root_view.get_attribute("joint_child", model).contiguous())[:, 0]
-        self.body_ids = torch.cat((parents[:, :1], children), dim=1).long()
+        # The free root joint already includes the first segment as its child.
+        self.body_ids = children.long()
         wp.to_torch(model.body_flags)[self.body_ids[:, 0]] = int(BodyFlags.KINEMATIC)
         self.grasp_active = wp.zeros(self.num_instances, dtype=wp.int32, device=self.device)
         self.grasp_relative_quat = wp.zeros(self.num_instances, dtype=wp.quat, device=self.device)

@@ -20,6 +20,7 @@ from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 from PIL import Image
 
 from isaaclab.app import launch_simulation
+from isaaclab.visualizers import WindowCfg
 
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
@@ -42,8 +43,7 @@ def main() -> None:
     cfg.sim.physics.load_visual_shapes = True
     cfg.sim.visualizer_cfgs = [
         NewtonGLVisualizerCfg(
-            window_width=1920,
-            window_height=1080,
+            window=WindowCfg(size=(1920, 1080)),
             headless=False,
             enable_picking=False,
             enable_markers=False,

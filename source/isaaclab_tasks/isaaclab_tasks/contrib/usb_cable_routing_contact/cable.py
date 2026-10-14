@@ -81,9 +81,9 @@ class ContactUsbCable(CableObject):
     def _initialize_impl(self) -> None:
         super()._initialize_impl()
         model = NewtonManager.get_model()
-        parents = wp.to_torch(self.root_view.get_attribute("joint_parent", model).contiguous())[:, 0]
         children = wp.to_torch(self.root_view.get_attribute("joint_child", model).contiguous())[:, 0]
-        self.body_ids = torch.cat((parents[:, :1], children), dim=1).long()
+        # The free root joint already includes the first segment as its child.
+        self.body_ids = children.long()
         wp.to_torch(model.body_flags)[self.body_ids[:, 0]] = int(BodyFlags.KINEMATIC)
         self._end_ids = wp.from_torch(self.body_ids[:, -1].to(torch.int32).contiguous())
         wrists = [index for index, label in enumerate(model.body_label) if label.endswith("/wrist_3_link")]

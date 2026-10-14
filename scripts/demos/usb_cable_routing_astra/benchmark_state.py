@@ -108,7 +108,7 @@ def capture_initial_state(env: ManagerBasedRLEnv, path: str | Path | None = None
     robot = command.robot
     cable = command.cable
     model = NewtonManager.get_model()
-    state = NewtonManager.get_state()
+    state = NewtonManager.get_state_0()
     arrays = {}
 
     def add(name: str, value: object, units: str) -> None:

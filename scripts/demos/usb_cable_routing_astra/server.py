@@ -28,6 +28,7 @@ from PIL import Image
 
 from isaaclab.app import launch_simulation
 from isaaclab.utils.math import axis_angle_from_quat, quat_inv, quat_mul
+from isaaclab.visualizers import WindowCfg
 
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
@@ -209,7 +210,7 @@ class DirectBridge:
 
     def snapshot(self) -> None:
         """Save every actual control-step pose, including the terminal pose before reset."""
-        self.poses.append(NewtonManager.get_state().body_q.numpy().copy())
+        self.poses.append(NewtonManager.get_state_0().body_q.numpy().copy())
         self.trace.append(self.measure())
 
     def save(self) -> None:
@@ -252,7 +253,7 @@ class DirectBridge:
             else:
                 eye, target = (0.86, 0.16, 0.48), (0.53, -0.15, 0.10)
             self.visualizer.set_camera_view(eye, target)
-            self.visualizer._state = NewtonManager.get_state()
+            self.visualizer._state = NewtonManager.get_state_0()
             pixels = self.visualizer.render_rgb_array()
             image_path = self.episode_dir / f"observation_{self.sequence:04d}.png"
             Image.fromarray(pixels).save(image_path)
@@ -417,8 +418,7 @@ def build_task_cfg(variant: str, seed: int, render_images: bool = True) -> Manag
             eye=(0.86, 0.16, 0.48),
             lookat=(0.53, -0.15, 0.10),
             focal_length=24.0,
-            window_width=1280,
-            window_height=720,
+            window=WindowCfg(size=(1280, 720)),
             headless=False,
             enable_picking=False,
             enable_markers=False,

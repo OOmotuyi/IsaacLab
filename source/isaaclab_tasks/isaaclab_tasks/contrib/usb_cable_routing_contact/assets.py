@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import warp as wp
-from newton import EqType
+from newton.solvers import SolverMuJoCo
 
 from pxr import Usd
 
@@ -124,7 +124,7 @@ def _configure_contact_linkage(builder: ModelBuilder, world_index: int) -> None:
             continue
         builder.add_custom_values(
             **{
-                "mujoco:equality_constraint_type": int(EqType.JOINT),
+                "mujoco:equality_constraint_type": int(SolverMuJoCo.EqType.JOINT),
                 "mujoco:equality_constraint_objtype": joint_object_kind,
                 "mujoco:equality_constraint_joint1": follower,
                 "mujoco:equality_constraint_joint2": leader,

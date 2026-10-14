@@ -149,7 +149,7 @@ class TestContactServer(unittest.TestCase):
                 with (
                     patch.object(
                         _SERVER.NewtonManager,
-                        "get_state",
+                        "get_state_0",
                         return_value=SimpleNamespace(body_q=SimpleNamespace(numpy=lambda: np.zeros((1, 7)))),
                     ),
                     patch.object(_SERVER.NewtonManager, "get_model", return_value=SimpleNamespace(body_label=["fake"])),

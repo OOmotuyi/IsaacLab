@@ -29,6 +29,7 @@ from PIL import Image
 
 from isaaclab.app import launch_simulation
 from isaaclab.utils.math import quat_apply_inverse, quat_inv, quat_mul
+from isaaclab.visualizers import WindowCfg
 
 from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry
 
@@ -111,7 +112,7 @@ class ContactProbe:
     def measure(self) -> dict:
         """Read cable, joints, contact loads [N, N m], and relative housing pose [m, xyzw]."""
         c = self.command
-        pose = wp.to_torch(NewtonManager.get_state().body_q)
+        pose = wp.to_torch(NewtonManager.get_state_0().body_q)
         wrist = pose[wp.to_torch(self.cable._wrist_ids).long()][0]
         plug = pose[self.cable.body_ids[0, -1]]
         relative_position = quat_apply_inverse(wrist[3:].unsqueeze(0), (plug[:3] - wrist[:3]).unsqueeze(0))[0]
@@ -221,13 +222,13 @@ class ContactProbe:
     def snapshot(self) -> None:
         """Record the current control-step state without advancing physics."""
         self.trace.append(self.measure())
-        self.poses.append(NewtonManager.get_state().body_q.numpy().copy())
+        self.poses.append(NewtonManager.get_state_0().body_q.numpy().copy())
 
     def capture_frame(self, filename: str | None = None, *, video_frame: bool = True) -> None:
         """Optionally render the current Newton state at the fixed gripper close-up camera."""
         if self.visualizer is None or (self.writer is None and not (filename and self.args.images)):
             return
-        self.visualizer._state = NewtonManager.get_state()
+        self.visualizer._state = NewtonManager.get_state_0()
         pixels = self.visualizer.render_rgb_array()
         if filename and self.args.images:
             Image.fromarray(pixels).save(self.args.output_dir / filename)
@@ -376,8 +377,7 @@ def main() -> None:
         cfg.sim.physics.load_visual_shapes = True
         cfg.sim.visualizer_cfgs = [
             NewtonGLVisualizerCfg(
-                window_width=args.width,
-                window_height=args.height,
+                window=WindowCfg(size=(args.width, args.height)),
                 focal_length=35.0,
                 headless=False,
                 enable_picking=False,
